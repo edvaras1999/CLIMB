@@ -13,11 +13,12 @@
 #include "skse/PluginAPI.h"
 #include "skse/skse_version.h"
 #include "Log.h"
+#include "PackLoader.h"
 
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.1.0 (passo 1: arranque)"
+#define PLUGIN_VERSION_STRING	"0.2.0 (passo 2: pacote de animacoes)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
@@ -99,6 +100,22 @@ namespace
 		ReportHkxLayout(path);
 	}
 
+	// Passo 2: carrega o pacote de animacoes com o codigo do proprio FreeClimb e diz o resultado.
+	void LoadAnimations()
+	{
+		_MESSAGE("loading the animation pack...");
+
+		PackSummary pack;
+		const bool ok = FC_LoadAnimationPack("Data/meshes/actors/character/animations/FreeClimb/pack.json", &pack);
+
+		_MESSAGE("animation pack: %s - loaded %u, rejected %u, missing %u; read %u KB, decoded %u KB, took %u ms",
+				 ok ? "ACCEPTED" : "REJECTED", pack.loaded, pack.rejected, pack.missing,
+				 pack.inputKB, pack.outputKB, pack.milliseconds);
+
+		if(pack.error[0])		_MESSAGE("  error: %s", pack.error);
+		if(pack.problems[0])	_MESSAGE("  problems: %s", pack.problems);
+	}
+
 	void OnMessage(SKSEMessagingInterface::Message * message)
 	{
 		if(!message) return;
@@ -108,6 +125,7 @@ namespace
 			case SKSEMessagingInterface::kMessage_DataLoaded:
 				_MESSAGE("message: DataLoaded - the game's data is ready");
 				CheckModFiles();
+				LoadAnimations();
 				break;
 
 			case SKSEMessagingInterface::kMessage_InputLoaded:

@@ -112,12 +112,48 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="FreeClimbLE.cpp" />
+    <ClCompile Include="PackLoader.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="src\AnimationPack.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="src\AnimationOverrides.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="src\HkxAnimation.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="src\HkxSpline.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <None Include="exports.def" />
   </ItemGroup>
   <ItemGroup>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Log.h" />
+    <ClInclude Include="PackLoader.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="FreeClimbLE.rc" />
