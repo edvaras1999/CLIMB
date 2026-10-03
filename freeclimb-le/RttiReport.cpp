@@ -111,6 +111,43 @@ namespace
 		return codeHi > codeLo && !regions.empty();
 	}
 
+	void LogNamed(const char * prefix, const vt::Named & n)
+	{
+		_MESSAGE("rtti: %s%08X  slots=%-3u offset=%-4d %s", prefix, n.vtable, n.slots, n.offset, n.name);
+	}
+
+	// Descobre os NOMES reais das classes, quando os que procuramos nao batem.
+	void DiscoverNames(const std::vector<vt::Region> & regions, unsigned codeLo, unsigned codeHi)
+	{
+		// A) as vtables que o Freerun LE ja verificou: que classe sao, de facto?
+		_MESSAGE("rtti: --- A) what the Freerun LE vtables really are ---");
+		for(size_t w = 0; w < sizeof(kWanted) / sizeof(kWanted[0]); ++w)
+		{
+			if(!kWanted[w].known) continue;
+			vt::Named n;
+			if(vt::Describe(regions, codeLo, codeHi, kWanted[w].known, n))
+				LogNamed("", n);
+			else
+				_MESSAGE("rtti: %08X  (not a vtable with RTTI)  [expected %s]", kWanted[w].known, kWanted[w].label);
+		}
+
+		// B) tudo o que existe na vizinhanca dessas vtables (onde ficam os outros tratadores)
+		_MESSAGE("rtti: --- B) every vtable between 010D4300 and 010D4800 ---");
+		const std::vector<vt::Named> range = vt::DumpRange(regions, codeLo, codeHi, 0x010D4300, 0x010D4800);
+		for(size_t i = 0; i < range.size(); ++i) LogNamed("", range[i]);
+		_MESSAGE("rtti: (%u vtables)", (unsigned)range.size());
+
+		// C) classes que nao apareceram, procuradas por parte do nome
+		const char * const parts[] = { "FadeNode", "Gamepad", "XInput" };
+		for(size_t p = 0; p < sizeof(parts) / sizeof(parts[0]); ++p)
+		{
+			_MESSAGE("rtti: --- C) names containing \"%s\" ---", parts[p]);
+			const std::vector<vt::Named> hits = vt::FindByNameContaining(regions, codeLo, codeHi, parts[p], 40);
+			for(size_t i = 0; i < hits.size(); ++i) LogNamed("", hits[i]);
+			if(hits.empty()) _MESSAGE("rtti: (none)");
+		}
+	}
+
 	void ScanAndLog()
 	{
 		const DWORD t0 = GetTickCount();
@@ -132,7 +169,20 @@ namespace
 		for(size_t w = 0; w < sizeof(kWanted) / sizeof(kWanted[0]); ++w)
 		{
 			const Wanted & want = kWanted[w];
-			const vt::Result r = vt::Find(regions, codeLo, codeHi, want.mangled);
+			vt::Result r = vt::Find(regions, codeLo, codeHi, want.mangled);
+
+			if(!r.typeFound)
+			{
+				// Tipos declarados como "struct" levam .?AU em vez de .?AV.
+				char alt[160];
+				_snprintf_s(alt, sizeof(alt), _TRUNCATE, "%s", want.mangled);
+				if(alt[0] == '.' && alt[1] == '?' && alt[2] == 'A' && alt[3] == 'V')
+				{
+					alt[3] = 'U';
+					r = vt::Find(regions, codeLo, codeHi, alt);
+					if(r.typeFound) _MESSAGE("rtti: %s is declared as a struct (.?AU)", want.label);
+				}
+			}
 
 			if(!r.typeFound || r.vtables.empty())
 			{
@@ -160,6 +210,8 @@ namespace
 
 		_MESSAGE("rtti: done in %u ms - cross-check %u of %u same; %u class(es) not found",
 				 (unsigned)(GetTickCount() - t0), same, checked, notFound);
+
+		DiscoverNames(regions, codeLo, codeHi);
 	}
 }
 

@@ -19,7 +19,7 @@
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.3.0 (passo 3: vtables do motor)"
+#define PLUGIN_VERSION_STRING	"0.3.1 (passo 3b: nomes das classes)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
@@ -27,12 +27,22 @@ static SKSEMessagingInterface *	g_messaging		= NULL;
 
 namespace
 {
-	const char * const kAnimDir = "Data\\meshes\\actors\\character\\animations\\FreeClimb\\";
+	// A pasta das animacoes pode estar no local original do mod (onde o Nemesis a varre)
+	// ou, se o utilizador a mover, em Data\SKSE\Plugins\FreeClimb\Animations\ (que o Nemesis ignora).
+	const char * const kAnimDirClassic	= "Data\\meshes\\actors\\character\\animations\\FreeClimb\\";
+	const char * const kAnimDirPlugin	= "Data\\SKSE\\Plugins\\FreeClimb\\Animations\\";
 
 	bool FileExists(const char * path)
 	{
 		const DWORD attrs = GetFileAttributesA(path);
 		return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+	}
+
+	const char * AnimDir()
+	{
+		static char pluginManifest[MAX_PATH];
+		_snprintf_s(pluginManifest, sizeof(pluginManifest), _TRUNCATE, "%spack.json", kAnimDirPlugin);
+		return FileExists(pluginManifest) ? kAnimDirPlugin : kAnimDirClassic;
 	}
 
 	void ReportFile(const char * path)
@@ -91,13 +101,13 @@ namespace
 		const char * const names[] = { "pack.json", "skeleton.json", "configs\\hang.json", "hang.hkx", "up.hkx", "ledgeCatch.hkx" };
 		for(int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); ++i)
 		{
-			_snprintf_s(path, sizeof(path), _TRUNCATE, "%s%s", kAnimDir, names[i]);
+			_snprintf_s(path, sizeof(path), _TRUNCATE, "%s%s", AnimDir(), names[i]);
 			ReportFile(path);
 		}
 
-		_snprintf_s(path, sizeof(path), _TRUNCATE, "%shang.hkx", kAnimDir);
+		_snprintf_s(path, sizeof(path), _TRUNCATE, "%shang.hkx", AnimDir());
 		ReportHkxLayout(path);
-		_snprintf_s(path, sizeof(path), _TRUNCATE, "%sledgeCatch.hkx", kAnimDir);
+		_snprintf_s(path, sizeof(path), _TRUNCATE, "%sledgeCatch.hkx", AnimDir());
 		ReportHkxLayout(path);
 	}
 
@@ -106,8 +116,12 @@ namespace
 	{
 		_MESSAGE("loading the animation pack...");
 
+		char manifest[MAX_PATH];
+		_snprintf_s(manifest, sizeof(manifest), _TRUNCATE, "%spack.json", AnimDir());
+		_MESSAGE("animation folder: %s", AnimDir());
+
 		PackSummary pack;
-		const bool ok = FC_LoadAnimationPack("Data/meshes/actors/character/animations/FreeClimb/pack.json", &pack);
+		const bool ok = FC_LoadAnimationPack(manifest, &pack);
 
 		_MESSAGE("animation pack: %s - loaded %u, rejected %u, missing %u; read %u KB, decoded %u KB, took %u ms",
 				 ok ? "ACCEPTED" : "REJECTED", pack.loaded, pack.rejected, pack.missing,

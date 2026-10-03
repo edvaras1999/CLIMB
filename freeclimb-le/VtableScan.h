@@ -37,4 +37,25 @@ namespace vt
 
 	// 'codeLo'..'codeHi' e o intervalo de enderecos executaveis (.text).
 	Result Find(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi, const char * mangledName);
+
+	// ---- o caminho inverso: partir de uma vtable e descobrir o nome da classe ----
+	struct Named
+	{
+		unsigned	vtable;
+		unsigned	slots;
+		int			offset;
+		unsigned	colAddress;
+		char		name[112];	// nome decorado, ex. ".?AVJumpHandler@@"
+	};
+
+	// A vtable que comeca em 'vtable' (le o ponteiro para o COL logo antes dela).
+	bool Describe(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi, unsigned vtable, Named & out);
+
+	// Todas as vtables cujo "ponteiro para COL" fica no intervalo [lo, hi).
+	std::vector<Named> DumpRange(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi,
+								 unsigned lo, unsigned hi);
+
+	// Todas as classes cujo nome decorado contem 'part' (no maximo 'maxResults' tipos).
+	std::vector<Named> FindByNameContaining(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi,
+											const char * part, unsigned maxResults);
 }
