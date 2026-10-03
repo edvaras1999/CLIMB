@@ -2,6 +2,9 @@
 // So LE memoria do proprio executavel; nao altera nada no jogo.
 
 #include <windows.h>
+#include <shlobj.h>
+#include <string.h>
+#include <string>
 #include <vector>
 
 #include "common/IDebugLog.h"
@@ -138,14 +141,122 @@ namespace
 		_MESSAGE("rtti: (%u vtables)", (unsigned)range.size());
 
 		// C) classes que nao apareceram, procuradas por parte do nome
-		const char * const parts[] = { "FadeNode", "Gamepad", "XInput" };
+		const char * const parts[] = { "FadeNode", "Gamepad", "XInput", "Node@@" };
 		for(size_t p = 0; p < sizeof(parts) / sizeof(parts[0]); ++p)
 		{
 			_MESSAGE("rtti: --- C) names containing \"%s\" ---", parts[p]);
-			const std::vector<vt::Named> hits = vt::FindByNameContaining(regions, codeLo, codeHi, parts[p], 40);
+			const std::vector<vt::Named> hits = vt::FindByNameContaining(regions, codeLo, codeHi, parts[p], 70);
 			for(size_t i = 0; i < hits.size(); ++i) LogNamed("", hits[i]);
 			if(hits.empty()) _MESSAGE("rtti: (none)");
 		}
+	}
+
+	// ---- passo 4: despejar o inicio de cada funcao virtual para um ficheiro de texto ----
+	void AppendHex(std::string & out, const unsigned char * p, unsigned n)
+	{
+		static const char * const digits = "0123456789ABCDEF";
+		for(unsigned i = 0; i < n; ++i)
+		{
+			out += digits[p[i] >> 4];
+			out += digits[p[i] & 15];
+		}
+	}
+
+	struct DumpTarget
+	{
+		const char *	mangled;
+		const char *	label;
+		unsigned		bytes;		// quantos bytes de cada funcao
+	};
+
+	const DumpTarget kDump[] =
+	{
+		{ ".?AVNiAVObject@@",				"NiAVObject",				192 },
+		{ ".?AVNiNode@@",					"NiNode",					192 },
+		{ ".?AVBSFlattenedBoneTree@@",		"BSFlattenedBoneTree",		192 },
+		{ ".?AVPlayerCharacter@@",			"PlayerCharacter",			128 },
+		{ ".?AVActor@@",					"Actor",					128 },
+		{ ".?AVBSWin32KeyboardDevice@@",	"BSWin32KeyboardDevice",	128 },
+		{ ".?AVBSWin32GamepadDevice@@",		"BSWin32GamepadDevice",		128 },
+		{ ".?AVBSGamepadDevice@@",			"BSGamepadDevice",			128 },
+		{ ".?AVThirdPersonState@@",			"ThirdPersonState",			128 },
+		{ ".?AVFirstPersonState@@",			"FirstPersonState",			128 },
+		{ ".?AVPlayerInputHandler@@",		"PlayerInputHandler",		128 },
+	};
+
+	void DumpVtablesToFile(const std::vector<vt::Region> & regions, unsigned codeLo, unsigned codeHi)
+	{
+		std::string out;
+		out.reserve(300 * 1024);
+		out += "# FreeClimb LE - vtable dump (passo 4)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
+		out += "# EXT = o slot aponta para fora do TESV.exe (outro plugin interceptou-o)\n";
+
+		unsigned classes = 0, functions = 0, external = 0;
+
+		for(size_t k = 0; k < sizeof(kDump) / sizeof(kDump[0]); ++k)
+		{
+			const vt::Result r = vt::Find(regions, codeLo, codeHi, kDump[k].mangled);
+
+			const vt::Found * primary = NULL;
+			for(size_t v = 0; v < r.vtables.size(); ++v)
+				if(r.vtables[v].offset == 0) { primary = &r.vtables[v]; break; }
+
+			char head[200];
+			if(!primary)
+			{
+				_snprintf_s(head, sizeof(head), _TRUNCATE, "== %s NOT FOUND\n", kDump[k].label);
+				out += head;
+				continue;
+			}
+
+			++classes;
+			_snprintf_s(head, sizeof(head), _TRUNCATE, "== %s vtable=%08X slots=%u bytes=%u\n",
+						kDump[k].label, primary->vtable, primary->slots, kDump[k].bytes);
+			out += head;
+
+			for(unsigned s = 0; s < primary->slots; ++s)
+			{
+				const unsigned fn = *(const unsigned *)(primary->vtable + 4 * s);
+				char line[64];
+				++functions;
+
+				if(fn >= codeLo && fn + kDump[k].bytes <= codeHi)
+				{
+					_snprintf_s(line, sizeof(line), _TRUNCATE, "%u %08X ", s, fn);
+					out += line;
+					AppendHex(out, (const unsigned char *)fn, kDump[k].bytes);
+					out += "\n";
+				}
+				else
+				{
+					++external;
+					_snprintf_s(line, sizeof(line), _TRUNCATE, "%u %08X EXT\n", s, fn);
+					out += line;
+				}
+			}
+		}
+
+		char path[MAX_PATH];
+		if(FAILED(SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, path)))
+		{
+			_MESSAGE("dump: could not find the Documents folder");
+			return;
+		}
+		strcat_s(path, sizeof(path), "\\My Games\\Skyrim\\SKSE\\FreeClimbLE_vtables.txt");
+
+		HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if(file == INVALID_HANDLE_VALUE)
+		{
+			_MESSAGE("dump: could not create %s", path);
+			return;
+		}
+
+		DWORD written = 0;
+		WriteFile(file, out.data(), (DWORD)out.size(), &written, NULL);
+		CloseHandle(file);
+
+		_MESSAGE("dump: %u classes, %u functions (%u outside TESV.exe), %u KB written to %s",
+				 classes, functions, external, (unsigned)(written / 1024), path);
 	}
 
 	void ScanAndLog()
@@ -212,6 +323,7 @@ namespace
 				 (unsigned)(GetTickCount() - t0), same, checked, notFound);
 
 		DiscoverNames(regions, codeLo, codeHi);
+		DumpVtablesToFile(regions, codeLo, codeHi);
 	}
 }
 
