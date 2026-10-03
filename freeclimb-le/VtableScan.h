@@ -55,6 +55,9 @@ namespace vt
 	std::vector<Named> DumpRange(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi,
 								 unsigned lo, unsigned hi);
 
+	// Quantos slots seguidos, a partir de 'vtable', apontam para codigo.
+	unsigned CountSlotsAt(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi, unsigned vtable);
+
 	// Todas as classes cujo nome decorado contem 'part' (no maximo 'maxResults' tipos).
 	std::vector<Named> FindByNameContaining(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi,
 											const char * part, unsigned maxResults);

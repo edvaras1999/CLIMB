@@ -159,6 +159,11 @@ namespace vt
 		bool ByCol(const Candidate & a, const Candidate & b) { return a.col < b.col; }
 	}
 
+	unsigned CountSlotsAt(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi, unsigned vtable)
+	{
+		return CountSlots(regions, vtable, codeLo, codeHi);
+	}
+
 	bool Describe(const std::vector<Region> & regions, unsigned codeLo, unsigned codeHi, unsigned vtable, Named & out)
 	{
 		unsigned col = 0, signature = 0, td = 0, first = 0, offsetField = 0;

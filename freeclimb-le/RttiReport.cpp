@@ -1,6 +1,7 @@
 // RttiReport.cpp - passo 3. Le a informacao de tipos (RTTI) do TESV.exe ja em memoria.
 // So LE memoria do proprio executavel; nao altera nada no jogo.
 
+#include <stdlib.h>
 #include <windows.h>
 #include <shlobj.h>
 #include <string.h>
@@ -173,6 +174,7 @@ namespace
 	{
 		{ ".?AVNiAVObject@@",				"NiAVObject",				192 },
 		{ ".?AVNiNode@@",					"NiNode",					192 },
+		{ "@0114D988",						"BSFadeNode (no RTTI)",		192 },
 		{ ".?AVBSFlattenedBoneTree@@",		"BSFlattenedBoneTree",		192 },
 		{ ".?AVPlayerCharacter@@",			"PlayerCharacter",			128 },
 		{ ".?AVActor@@",					"Actor",					128 },
@@ -195,11 +197,24 @@ namespace
 
 		for(size_t k = 0; k < sizeof(kDump) / sizeof(kDump[0]); ++k)
 		{
-			const vt::Result r = vt::Find(regions, codeLo, codeHi, kDump[k].mangled);
-
+			vt::Result r;
+			vt::Found byAddress;
 			const vt::Found * primary = NULL;
-			for(size_t v = 0; v < r.vtables.size(); ++v)
-				if(r.vtables[v].offset == 0) { primary = &r.vtables[v]; break; }
+
+			if(kDump[k].mangled[0] == '@')
+			{
+				// classe sem RTTI: a vtable e dada pelo endereco ("@0114D988")
+				const unsigned addr = (unsigned)strtoul(kDump[k].mangled + 1, NULL, 16);
+				byAddress.colAddress = 0; byAddress.offset = 0; byAddress.vtable = addr;
+				byAddress.slots = vt::CountSlotsAt(regions, codeLo, codeHi, addr);
+				if(byAddress.slots) primary = &byAddress;
+			}
+			else
+			{
+				r = vt::Find(regions, codeLo, codeHi, kDump[k].mangled);
+				for(size_t v = 0; v < r.vtables.size(); ++v)
+					if(r.vtables[v].offset == 0) { primary = &r.vtables[v]; break; }
+			}
 
 			char head[200];
 			if(!primary)
@@ -333,44 +348,84 @@ namespace
 		return worst;
 	}
 
-	void PrintNode(const std::vector<vt::Region> & regions, unsigned lo, unsigned hi,
-				   unsigned node, int depth, unsigned & budget)
+	// Quantos dos primeiros 51 slots a vtable 'vt' partilha com a do NiNode: um no derivado
+	// (como o BSFadeNode, que nao tem RTTI no LE) partilha quase todos.
+	unsigned SharedWithNiNode(unsigned vtable, unsigned niNodeVtable)
 	{
-		if(budget == 0 || depth > 9 || !Readable(node, 0xC0)) return;
-		--budget;
+		if(!vtable || !niNodeVtable || !Readable(vtable, 51 * 4)) return 0;
+		unsigned same = 0;
+		for(unsigned s = 0; s < 51; ++s)
+			if(Rd32(vtable + 4 * s) == Rd32(niNodeVtable + 4 * s)) ++same;
+		return same;
+	}
 
-		char cls[112];	ClassOf(regions, lo, hi, node, cls, sizeof(cls));
-		const unsigned namePtr = Rd32(node + 0x08);
-		char n8[40], nC[40];
-		AsciiAt(namePtr + 0x08, n8, sizeof(n8));
-		AsciiAt(namePtr + 0x0C, nC, sizeof(nC));
+	struct SceneCtx
+	{
+		const std::vector<vt::Region> *	regions;
+		unsigned						codeLo, codeHi;
+		unsigned						niNodeVtable;
+		unsigned						budget;
+		unsigned						flattened;	// endereco do BSFlattenedBoneTree, se achado
+	};
+
+	void PrintNode(SceneCtx & ctx, unsigned node, int depth)
+	{
+		if(ctx.budget == 0 || depth > 12 || !Readable(node, 0xC0)) return;
+		--ctx.budget;
+
+		const unsigned vtable = Rd32(node);
+		char cls[112];
+		ClassOf(*ctx.regions, ctx.codeLo, ctx.codeHi, node, cls, sizeof(cls));
+		const unsigned shared = SharedWithNiNode(vtable, ctx.niNodeVtable);
+		const bool isNode = strstr(cls, "Node") != NULL || shared >= 35;
+
+		if(strstr(cls, "BSFlattenedBoneTree")) ctx.flattened = node;
+
+		// No LE o BSFixedString aponta direto para os caracteres.
+		char name[64];
+		AsciiAt(Rd32(node + 0x08), name, sizeof(name));
 
 		char indent[32];
-		int pad = depth * 2; if(pad > 20) pad = 20;
+		int pad = depth * 2; if(pad > 24) pad = 24;
 		memset(indent, ' ', pad); indent[pad] = 0;
 
-		_MESSAGE("scene: %s%08X %-24s name[+8]='%s' name[+C]='%s' parent=%08X flags=%08X radius=%.1f",
-				 indent, node, cls, n8, nC, Rd32(node + 0x1C), Rd32(node + 0x98), RdF(node + 0x94));
-		_MESSAGE("scene: %s   local t=(%.2f %.2f %.2f) s=%.3f | world t=(%.2f %.2f %.2f) s=%.3f",
-				 indent, RdF(node + 0x44), RdF(node + 0x48), RdF(node + 0x4C), RdF(node + 0x50),
-				 RdF(node + 0x78), RdF(node + 0x7C), RdF(node + 0x80), RdF(node + 0x84));
+		char label[160];
+		if(cls[0] == '?') _snprintf_s(label, sizeof(label), _TRUNCATE, "?(vt %08X, %u/51 shared with NiNode)", vtable, shared);
+		else              _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", cls);
 
-		// so os nos (NiNode e derivados) tem a lista de filhos nestes deslocamentos
-		if(!strstr(cls, "Node")) return;
+		_MESSAGE("scene: %s%08X %s '%s' p18=%08X p1C=%08X t=(%.1f %.1f %.1f) s=%.2f",
+				 indent, node, label, name, Rd32(node + 0x18), Rd32(node + 0x1C),
+				 RdF(node + 0x44), RdF(node + 0x48), RdF(node + 0x4C), RdF(node + 0x50));
+
+		if(!isNode) return;
 
 		const unsigned data  = Rd32(node + 0xAC);
-		const unsigned count = Rd16(node + 0xB2);
-		if(!data || count == 0 || count > 512 || !Readable(data, count * 4)) return;
+		const unsigned count = Rd16(node + 0xB4);	// m_size (confirmado: 15 filhos na raiz)
+		const unsigned bound = Rd16(node + 0xB2);
+		if(!data || count == 0 || count > 512 || bound > 512 || !Readable(data, bound * 4)) return;
 
-		for(unsigned i = 0; i < count; ++i)
+		for(unsigned i = 0; i < bound; ++i)
 		{
 			const unsigned child = Rd32(data + 4 * i);
-			if(child) PrintNode(regions, lo, hi, child, depth + 1, budget);
+			if(child) PrintNode(ctx, child, depth + 1);
+		}
+	}
+
+	// Linhas de bytes brutos (4 dwords por linha), para eu ler os campos de um objeto.
+	void RawRows(const char * tag, unsigned address, unsigned bytes)
+	{
+		for(unsigned row = 0; row < bytes; row += 16)
+		{
+			if(!Readable(address + row, 16)) break;
+			_MESSAGE("scene: %s +%03X  %08X %08X %08X %08X", tag, row,
+					 Rd32(address + row), Rd32(address + row + 4), Rd32(address + row + 8), Rd32(address + row + 12));
 		}
 	}
 
 	void ProbeScene()
 	{
+		const DWORD t0 = GetTickCount();
+
 		std::vector<vt::Region> regions;
 		unsigned codeLo = 0, codeHi = 0;
 		if(!Collect(regions, codeLo, codeHi)) { _MESSAGE("scene: could not read the executable's sections"); return; }
@@ -390,38 +445,53 @@ namespace
 		_MESSAGE("scene: player=%08X  third-person root=%08X  first-person root=%08X", player, third, first);
 		if(!third) { _MESSAGE("scene: the player has no 3D yet"); return; }
 
-		char cls[112];
-		ClassOf(regions, codeLo, codeHi, third, cls, sizeof(cls));
-		_MESSAGE("scene: third-person root class = %s", cls);
-		ClassOf(regions, codeLo, codeHi, first, cls, sizeof(cls));
-		_MESSAGE("scene: first-person root class = %s", first ? cls : "(none)");
+		const vt::Result niNode = vt::Find(regions, codeLo, codeHi, ".?AVNiNode@@");
+		unsigned niNodeVtable = 0;
+		for(size_t v = 0; v < niNode.vtables.size(); ++v)
+			if(niNode.vtables[v].offset == 0) niNodeVtable = niNode.vtables[v].vtable;
 
-		// A) campos do no raiz que apontam para objetos com RTTI
-		_MESSAGE("scene: --- A) pointer fields inside the third-person root (offset -> class) ---");
-		for(unsigned off = 0; off < 0x1C0; off += 4)
+		// A) as vtables das duas raizes (sem RTTI): quantos slots e quantos partilham com o NiNode
+		const unsigned rootVt3 = Rd32(third), rootVt1 = first ? Rd32(first) : 0;
+		_MESSAGE("scene: third root vtable %08X: %u slots, %u/51 shared with NiNode",
+				 rootVt3, vt::CountSlotsAt(regions, codeLo, codeHi, rootVt3), SharedWithNiNode(rootVt3, niNodeVtable));
+		if(rootVt1)
+			_MESSAGE("scene: first root vtable %08X: %u slots, %u/51 shared with NiNode",
+					 rootVt1, vt::CountSlotsAt(regions, codeLo, codeHi, rootVt1), SharedWithNiNode(rootVt1, niNodeVtable));
+
+		// B) a arvore de nos completa
+		_MESSAGE("scene: --- node tree (third person) ---");
+		SceneCtx ctx;
+		ctx.regions = &regions; ctx.codeLo = codeLo; ctx.codeHi = codeHi;
+		ctx.niNodeVtable = niNodeVtable; ctx.budget = 400; ctx.flattened = 0;
+		PrintNode(ctx, third, 0);
+		_MESSAGE("scene: --- end (%u nodes printed) ---", 400 - ctx.budget);
+
+		// C) o BSFlattenedBoneTree, se esta na arvore: bytes brutos + o que ha por tras dos ponteiros
+		if(ctx.flattened)
 		{
-			const unsigned v = Rd32(third + off);
-			if(v < 0x10000 || !Readable(v, 4)) continue;
-			ClassOf(regions, codeLo, codeHi, v, cls, sizeof(cls));
-			if(cls[0] != '?') _MESSAGE("scene:   +0x%03X -> %08X  %s", off, v, cls);
+			_MESSAGE("scene: --- BSFlattenedBoneTree at %08X ---", ctx.flattened);
+			RawRows("flat", ctx.flattened, 0x1A0);
+
+			unsigned shown = 0;
+			for(unsigned off = 0xB8; off < 0x1A0 && shown < 4; off += 4)
+			{
+				const unsigned p = Rd32(ctx.flattened + off);
+				if(p < 0x10000 || !Readable(p, 0x100)) continue;
+				const unsigned head = Rd32(p);
+				if(head >= codeLo && head < codeHi) continue;		// um objeto com funcoes: nao e o array
+				char c2[112]; ClassOf(regions, codeLo, codeHi, p, c2, sizeof(c2));
+				if(c2[0] != '?') continue;							// objeto com RTTI: nao e o array
+				_MESSAGE("scene: flat field +0x%03X -> %08X (first 0x100 bytes)", off, p);
+				RawRows("flatdata", p, 0x100);
+				++shown;
+			}
+		}
+		else
+		{
+			_MESSAGE("scene: no BSFlattenedBoneTree found in the third-person tree");
 		}
 
-		// B) a matriz de rotacao e a escala sao validas nos deslocamentos deduzidos?
-		_MESSAGE("scene: --- B) layout check on the root ---");
-		_MESSAGE("scene:   local rotation error (0 = perfect rotation) = %.5f   scale=%.4f", RotationError(third + 0x20), RdF(third + 0x50));
-		_MESSAGE("scene:   world rotation error                         = %.5f   scale=%.4f", RotationError(third + 0x54), RdF(third + 0x84));
-
-		// C) bytes brutos do inicio do no (para eu confirmar os campos)
-		_MESSAGE("scene: --- C) first 0xC0 bytes of the root ---");
-		for(unsigned row = 0; row < 0xC0; row += 16)
-			_MESSAGE("scene:   +%03X  %08X %08X %08X %08X", row,
-					 Rd32(third + row), Rd32(third + row + 4), Rd32(third + row + 8), Rd32(third + row + 12));
-
-		// D) a arvore de nos
-		_MESSAGE("scene: --- D) node tree ---");
-		unsigned budget = 150;
-		PrintNode(regions, codeLo, codeHi, third, 0, budget);
-		_MESSAGE("scene: --- end (%u nodes printed) ---", 150 - budget);
+		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));
 	}
 
 	void ScanAndLog()
