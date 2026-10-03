@@ -14,11 +14,12 @@
 #include "skse/skse_version.h"
 #include "Log.h"
 #include "PackLoader.h"
+#include "RttiReport.h"
 
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.2.0 (passo 2: pacote de animacoes)"
+#define PLUGIN_VERSION_STRING	"0.3.0 (passo 3: vtables do motor)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
@@ -126,6 +127,7 @@ namespace
 				_MESSAGE("message: DataLoaded - the game's data is ready");
 				CheckModFiles();
 				LoadAnimations();
+				ReportRtti();
 				break;
 
 			case SKSEMessagingInterface::kMessage_InputLoaded:
