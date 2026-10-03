@@ -19,7 +19,7 @@
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.4.0 (passo 4: despejo das vtables)"
+#define PLUGIN_VERSION_STRING	"0.5.0 (passo 5: sonda do esqueleto)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
@@ -150,6 +150,7 @@ namespace
 
 			case SKSEMessagingInterface::kMessage_PostLoadGame:
 				_MESSAGE("message: a save was loaded");
+				ReportScene();
 				break;
 
 			case SKSEMessagingInterface::kMessage_NewGame:

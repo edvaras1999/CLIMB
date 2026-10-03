@@ -259,6 +259,171 @@ namespace
 				 classes, functions, external, (unsigned)(written / 1024), path);
 	}
 
+	// ======================= passo 5: sonda do esqueleto do jogador =======================
+
+	bool Readable(unsigned address, unsigned size)
+	{
+		if(address < 0x10000 || address + size < address) return false;
+
+		unsigned p = address;
+		const unsigned end = address + size;
+		while(p < end)
+		{
+			MEMORY_BASIC_INFORMATION mbi;
+			if(!VirtualQuery((LPCVOID)p, &mbi, sizeof(mbi))) return false;
+			if(mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+
+			const unsigned regionEnd = (unsigned)mbi.BaseAddress + (unsigned)mbi.RegionSize;
+			if(regionEnd <= p) return false;
+			p = regionEnd;
+		}
+		return true;
+	}
+
+	unsigned Rd32(unsigned a)	{ return Readable(a, 4) ? *(const unsigned *)a : 0; }
+	unsigned Rd16(unsigned a)	{ return Readable(a, 2) ? *(const unsigned short *)a : 0; }
+	float    RdF (unsigned a)	{ return Readable(a, 4) ? *(const float *)a : 0.0f; }
+
+	// Nome da classe do objeto em 'obj' (a partir da vtable e do RTTI), ou "?".
+	void ClassOf(const std::vector<vt::Region> & regions, unsigned lo, unsigned hi, unsigned obj, char * out, size_t size)
+	{
+		out[0] = '?'; out[1] = 0;
+		const unsigned vtable = Rd32(obj);
+		if(!vtable) return;
+
+		vt::Named n;
+		if(vt::Describe(regions, lo, hi, vtable, n))
+		{
+			strncpy_s(out, size, n.name, _TRUNCATE);
+		}
+	}
+
+	// Texto ASCII imprimivel em 'address' (pontos para o resto).
+	void AsciiAt(unsigned address, char * out, size_t size)
+	{
+		out[0] = 0;
+		if(!address || !Readable(address, (unsigned)(size - 1))) return;
+
+		size_t i = 0;
+		for(; i + 1 < size; ++i)
+		{
+			const unsigned char ch = *(const unsigned char *)(address + i);
+			if(ch == 0) break;
+			out[i] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : '.';
+		}
+		out[i] = 0;
+	}
+
+	// Maior desvio de uma matriz 3x3 (9 floats em 'a') em relacao a uma matriz de rotacao.
+	float RotationError(unsigned a)
+	{
+		float m[9];
+		for(int i = 0; i < 9; ++i) m[i] = RdF(a + 4 * i);
+
+		float worst = 0.0f;
+		for(int i = 0; i < 3; ++i)
+			for(int j = 0; j < 3; ++j)
+			{
+				float dot = 0.0f;
+				for(int k = 0; k < 3; ++k) dot += m[i * 3 + k] * m[j * 3 + k];	// linha i . linha j
+				float err = dot - (i == j ? 1.0f : 0.0f);
+				if(err < 0) err = -err;
+				if(err > worst) worst = err;
+			}
+		return worst;
+	}
+
+	void PrintNode(const std::vector<vt::Region> & regions, unsigned lo, unsigned hi,
+				   unsigned node, int depth, unsigned & budget)
+	{
+		if(budget == 0 || depth > 9 || !Readable(node, 0xC0)) return;
+		--budget;
+
+		char cls[112];	ClassOf(regions, lo, hi, node, cls, sizeof(cls));
+		const unsigned namePtr = Rd32(node + 0x08);
+		char n8[40], nC[40];
+		AsciiAt(namePtr + 0x08, n8, sizeof(n8));
+		AsciiAt(namePtr + 0x0C, nC, sizeof(nC));
+
+		char indent[32];
+		int pad = depth * 2; if(pad > 20) pad = 20;
+		memset(indent, ' ', pad); indent[pad] = 0;
+
+		_MESSAGE("scene: %s%08X %-24s name[+8]='%s' name[+C]='%s' parent=%08X flags=%08X radius=%.1f",
+				 indent, node, cls, n8, nC, Rd32(node + 0x1C), Rd32(node + 0x98), RdF(node + 0x94));
+		_MESSAGE("scene: %s   local t=(%.2f %.2f %.2f) s=%.3f | world t=(%.2f %.2f %.2f) s=%.3f",
+				 indent, RdF(node + 0x44), RdF(node + 0x48), RdF(node + 0x4C), RdF(node + 0x50),
+				 RdF(node + 0x78), RdF(node + 0x7C), RdF(node + 0x80), RdF(node + 0x84));
+
+		// so os nos (NiNode e derivados) tem a lista de filhos nestes deslocamentos
+		if(!strstr(cls, "Node")) return;
+
+		const unsigned data  = Rd32(node + 0xAC);
+		const unsigned count = Rd16(node + 0xB2);
+		if(!data || count == 0 || count > 512 || !Readable(data, count * 4)) return;
+
+		for(unsigned i = 0; i < count; ++i)
+		{
+			const unsigned child = Rd32(data + 4 * i);
+			if(child) PrintNode(regions, lo, hi, child, depth + 1, budget);
+		}
+	}
+
+	void ProbeScene()
+	{
+		std::vector<vt::Region> regions;
+		unsigned codeLo = 0, codeHi = 0;
+		if(!Collect(regions, codeLo, codeHi)) { _MESSAGE("scene: could not read the executable's sections"); return; }
+
+		const unsigned player = Rd32(0x01310588);	// g_thePlayer (SKSE LE), o mesmo que o Freerun LE usa
+		if(!player) { _MESSAGE("scene: no player object yet"); return; }
+
+		// TESObjectREFR::GetNiRootNode(firstPerson) = slot 0x6F (como no Freerun LE)
+		const unsigned vtable = Rd32(player);
+		if(!Readable(vtable, (0x6F + 1) * 4)) { _MESSAGE("scene: player vtable unreadable"); return; }
+
+		typedef unsigned (__thiscall * GetRoot_t)(void *, unsigned);
+		const GetRoot_t getRoot = (GetRoot_t)Rd32(vtable + 0x6F * 4);
+
+		const unsigned third = getRoot((void *)player, 0);
+		const unsigned first = getRoot((void *)player, 1);
+		_MESSAGE("scene: player=%08X  third-person root=%08X  first-person root=%08X", player, third, first);
+		if(!third) { _MESSAGE("scene: the player has no 3D yet"); return; }
+
+		char cls[112];
+		ClassOf(regions, codeLo, codeHi, third, cls, sizeof(cls));
+		_MESSAGE("scene: third-person root class = %s", cls);
+		ClassOf(regions, codeLo, codeHi, first, cls, sizeof(cls));
+		_MESSAGE("scene: first-person root class = %s", first ? cls : "(none)");
+
+		// A) campos do no raiz que apontam para objetos com RTTI
+		_MESSAGE("scene: --- A) pointer fields inside the third-person root (offset -> class) ---");
+		for(unsigned off = 0; off < 0x1C0; off += 4)
+		{
+			const unsigned v = Rd32(third + off);
+			if(v < 0x10000 || !Readable(v, 4)) continue;
+			ClassOf(regions, codeLo, codeHi, v, cls, sizeof(cls));
+			if(cls[0] != '?') _MESSAGE("scene:   +0x%03X -> %08X  %s", off, v, cls);
+		}
+
+		// B) a matriz de rotacao e a escala sao validas nos deslocamentos deduzidos?
+		_MESSAGE("scene: --- B) layout check on the root ---");
+		_MESSAGE("scene:   local rotation error (0 = perfect rotation) = %.5f   scale=%.4f", RotationError(third + 0x20), RdF(third + 0x50));
+		_MESSAGE("scene:   world rotation error                         = %.5f   scale=%.4f", RotationError(third + 0x54), RdF(third + 0x84));
+
+		// C) bytes brutos do inicio do no (para eu confirmar os campos)
+		_MESSAGE("scene: --- C) first 0xC0 bytes of the root ---");
+		for(unsigned row = 0; row < 0xC0; row += 16)
+			_MESSAGE("scene:   +%03X  %08X %08X %08X %08X", row,
+					 Rd32(third + row), Rd32(third + row + 4), Rd32(third + row + 8), Rd32(third + row + 12));
+
+		// D) a arvore de nos
+		_MESSAGE("scene: --- D) node tree ---");
+		unsigned budget = 150;
+		PrintNode(regions, codeLo, codeHi, third, 0, budget);
+		_MESSAGE("scene: --- end (%u nodes printed) ---", 150 - budget);
+	}
+
 	void ScanAndLog()
 	{
 		const DWORD t0 = GetTickCount();
@@ -337,4 +502,40 @@ void ReportRtti()
 	{
 		_MESSAGE("rtti: the scan faulted (code %08X) and was abandoned", (unsigned)GetExceptionCode());
 	}
+}
+
+namespace
+{
+	void SafeProbe()
+	{
+		__try
+		{
+			ProbeScene();
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			_MESSAGE("scene: the probe faulted (code %08X) and was abandoned", (unsigned)GetExceptionCode());
+		}
+	}
+
+	DWORD WINAPI RetryThread(LPVOID)
+	{
+		Sleep(12000);	// da tempo ao jogo para carregar o personagem
+		_MESSAGE("scene: retrying after 12 s");
+		SafeProbe();
+		return 0;
+	}
+}
+
+void ReportScene()
+{
+	static int calls = 0;
+	if(++calls > 2) return;		// so as duas primeiras cargas de save
+
+	_MESSAGE("scene: probing the player's skeleton (read-only)...");
+	SafeProbe();
+
+	// o personagem pode ainda nao ter 3D logo apos a mensagem: repete uma vez mais tarde
+	HANDLE t = CreateThread(NULL, 0, RetryThread, NULL, 0, NULL);
+	if(t) CloseHandle(t);
 }
