@@ -109,22 +109,6 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\skse\skse\SafeWrite.cpp" />
-    <ClCompile Include="..\..\skse\skse\GameAPI.cpp" />
-    <ClCompile Include="..\..\skse\skse\GameMenus.cpp" />
-    <ClCompile Include="..\..\skse\skse\GameTypes.cpp" />
-    <ClCompile Include="..\..\skse\skse\NiTypes.cpp" />
-    <ClCompile Include="..\..\skse\skse\GameInput.cpp" />
-    <ClCompile Include="..\..\skse\skse\InputMap.cpp" />
-    <ClCompile Include="..\..\skse\skse\ScaleformAPI.cpp" />
-    <ClCompile Include="..\..\skse\skse\ScaleformCallbacks.cpp" />
-    <ClCompile Include="..\..\skse\skse\ScaleformMovie.cpp" />
-    <ClCompile Include="..\..\skse\skse\PapyrusNativeFunctions.cpp" />
-    <ClCompile Include="..\..\skse\skse\PapyrusArgs.cpp" />
-    <ClCompile Include="..\..\skse\skse\PapyrusVM.cpp" />
-    <ClCompile Include="..\..\skse\skse\HashUtil.cpp" />
-    <ClCompile Include="..\..\skse\skse\Utilities.cpp" />
-    <ClCompile Include="..\..\skse\skse\GameRTTI.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="FreeClimbLE.cpp" />
