@@ -51,7 +51,7 @@ namespace
 	}
 
 	// ---- experiencia de escrita (passo 10) ----
-	volatile unsigned	g_headIndex = 0xFFFFFFFF;
+	volatile unsigned	g_headIndex = 0xFFFFFFFF, g_armIndex = 0xFFFFFFFF, g_activeIndex = 0xFFFFFFFF;
 	volatile DWORD		g_expStart = 0, g_expEnd = 0;
 	volatile LONG		g_inExp = 0, g_expApplied = 0, g_expSkipped = 0;
 
@@ -72,45 +72,54 @@ namespace
 		return true;
 	}
 
-	// Escreve a rotacao alterada no osso da cabeca. Devolve true se escreveu (e preencheu saved/node).
-	bool BeginExperiment(void * flat, float * saved, unsigned * nodeOut)
+	// Escreve a rotacao alterada na ENTRADA da tabela achatada do osso da cabeca (e nao no no):
+	// quando um osso tem entrada, e a entrada que o jogo usa (no FreeClimb: local() = flat ? *flat : node->local).
+	// Devolve true se escreveu (e preencheu 'saved' e 'entryOut').
+	bool BeginExperiment(void * flat, float * saved, unsigned * entryOut)
 	{
 		const DWORD now = GetTickCount();
-		if(!g_expStart || now < g_expStart || now > g_expEnd || g_headIndex == 0xFFFFFFFF) return false;
+		if(!g_expStart || now < g_expStart || now > g_expEnd || g_activeIndex == 0xFFFFFFFF) return false;
 
-		const unsigned entries = ReadableMem((unsigned)flat + 0xC0, 4) ? *(const unsigned *)((unsigned)flat + 0xC0) : 0;
-		if(!entries) { InterlockedIncrement(&g_expSkipped); return false; }
+		const unsigned f = (unsigned)flat;
+		if(!ReadableMem(f + 0xB8, 12)) { InterlockedIncrement(&g_expSkipped); return false; }
 
-		const unsigned entry = entries + g_headIndex * 0x78;
-		if(!ReadableMem(entry + 0x70, 4)) { InterlockedIncrement(&g_expSkipped); return false; }
+		const unsigned count   = *(const unsigned *)(f + 0xB8);
+		const unsigned entries = *(const unsigned *)(f + 0xC0);
+		if(!entries || g_activeIndex >= count) { InterlockedIncrement(&g_expSkipped); return false; }
 
-		const unsigned node = *(const unsigned *)(entry + 0x70);
-		if(!node || !ReadableMem(node + 0x20, 0x34)) { InterlockedIncrement(&g_expSkipped); return false; }
+		const unsigned entry = entries + g_activeIndex * 0x78;
+		if(!ReadableMem(entry, 0x78)) { InterlockedIncrement(&g_expSkipped); return false; }
 
 		if(InterlockedCompareExchange(&g_inExp, 1, 0) != 0) return false;	// outra thread ja esta dentro
 
-		float * rot = (float *)(node + 0x20);
+		float * rot = (float *)entry;										// NiTransform local: rotacao 3x3 em +0x00
 		memcpy(saved, rot, 9 * sizeof(float));
 
+		// movimento circular amplo (cone de ~40 graus, 0.5 Hz): Rz(a) * Ry(b)
 		const float t = (float)(now - g_expStart) / 1000.0f;
-		const float angle = 0.6f * sinf(t * 4.7124f);						// +-34 graus, 0.75 Hz
-		const float c = cosf(angle), sn = sinf(angle);
-		const float R[9] = { c, -sn, 0, sn, c, 0, 0, 0, 1 };				// rotacao em torno do eixo Z local
+		const float a = 0.7f * sinf(t * 3.1416f), bAngle = 0.7f * cosf(t * 3.1416f);
+		const float ca = cosf(a), sa = sinf(a), cb = cosf(bAngle), sb = sinf(bAngle);
+		const float Rz[9] = { ca, -sa, 0, sa, ca, 0, 0, 0, 1 };
+		const float Ry[9] = { cb, 0, sb, 0, 1, 0, -sb, 0, cb };
+		float R[9];
+		for(int i = 0; i < 3; ++i)
+			for(int j = 0; j < 3; ++j)
+				R[i * 3 + j] = Rz[i * 3 + 0] * Ry[0 * 3 + j] + Rz[i * 3 + 1] * Ry[1 * 3 + j] + Rz[i * 3 + 2] * Ry[2 * 3 + j];
 
-		float out[9];
+		float out[9];	// nova rotacao = antiga * R
 		for(int i = 0; i < 3; ++i)
 			for(int j = 0; j < 3; ++j)
 				out[i * 3 + j] = saved[i * 3 + 0] * R[0 * 3 + j] + saved[i * 3 + 1] * R[1 * 3 + j] + saved[i * 3 + 2] * R[2 * 3 + j];
 
 		memcpy(rot, out, 9 * sizeof(float));
-		*nodeOut = node;
+		*entryOut = entry;
 		InterlockedIncrement(&g_expApplied);
 		return true;
 	}
 
-	void EndExperiment(unsigned node, const float * saved)
+	void EndExperiment(unsigned entry, const float * saved)
 	{
-		if(ReadableMem(node + 0x20, 9 * sizeof(float))) memcpy((void *)(node + 0x20), saved, 9 * sizeof(float));
+		if(ReadableMem(entry, 9 * sizeof(float))) memcpy((void *)entry, saved, 9 * sizeof(float));
 		InterlockedExchange(&g_inExp, 0);
 	}
 
@@ -137,12 +146,12 @@ namespace
 			Count(kDownward, self);
 
 			float saved[9];
-			unsigned node = 0;
-			const bool applied = ((unsigned)self == g_playerFlat && g_playerFlat) ? BeginExperiment(self, saved, &node) : false;
+			unsigned entry = 0;
+			const bool applied = ((unsigned)self == g_playerFlat && g_playerFlat) ? BeginExperiment(self, saved, &entry) : false;
 
 			original(self, data, flags);
 
-			if(applied) EndExperiment(node, saved);
+			if(applied) EndExperiment(entry, saved);
 		}
 	};
 	Fn2 Pass2<kFlatTree, kDownward>::original = NULL;
@@ -192,7 +201,7 @@ namespace
 	{
 		LONG lastRoot[kKinds] = { 0 }, lastFlat[kKinds] = { 0 };
 
-		for(int round = 1; round <= 9; ++round)
+		for(int round = 1; round <= 24; ++round)
 		{
 			Sleep(5000);
 
@@ -214,8 +223,8 @@ namespace
 			_MESSAGE("hooks:   threads that updated the player's skeleton:%s   (plugin was loaded on thread %lu)",
 					 threads, (unsigned long)g_loadThread);
 			if(g_expStart)
-				_MESSAGE("experiment: head wobble applied %ld times so far, skipped %ld  (%s)", g_expApplied, g_expSkipped,
-						 GetTickCount() < g_expStart ? "waiting to start" : GetTickCount() <= g_expEnd ? "RUNNING - watch the head" : "finished");
+				_MESSAGE("experiment: applied %ld times so far, skipped %ld  (%s)", g_expApplied, g_expSkipped,
+						 GetTickCount() <= g_expEnd ? "RUNNING" : "idle");
 		}
 		return 0;
 	}
@@ -256,11 +265,44 @@ void SceneHooksStartReport()
 	if(t) CloseHandle(t);
 }
 
-void SceneHooksStartExperiment(unsigned headIndex)
+namespace
 {
+	DWORD WINAPI KeyThread(LPVOID)
+	{
+		bool wasHead = false, wasArm = false;
+		for(;;)
+		{
+			Sleep(40);
+			const bool head = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+			const bool arm  = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+			const DWORD now = GetTickCount();
+
+			if(head && !wasHead && g_headIndex != 0xFFFFFFFF)
+			{
+				g_activeIndex = g_headIndex; g_expApplied = 0; g_expSkipped = 0; g_expStart = now; g_expEnd = now + 10000;
+				_MESSAGE("experiment: F7 pressed - head (entry %u) circular motion for 10 s", g_headIndex);
+			}
+			if(arm && !wasArm && g_armIndex != 0xFFFFFFFF)
+			{
+				g_activeIndex = g_armIndex; g_expApplied = 0; g_expSkipped = 0; g_expStart = now; g_expEnd = now + 10000;
+				_MESSAGE("experiment: F8 pressed - left upper arm (entry %u) circular motion for 10 s", g_armIndex);
+			}
+			wasHead = head; wasArm = arm;
+		}
+	}
+}
+
+void SceneHooksStartExperiment(unsigned headIndex, unsigned armIndex)
+{
+	static bool started = false;
 	g_headIndex = headIndex;
-	g_expApplied = 0; g_expSkipped = 0;
-	g_expStart = GetTickCount() + 8000;
-	g_expEnd = g_expStart + 10000;
-	_MESSAGE("experiment: head bone is flat entry %u; the head will wobble from +8 s to +18 s (third person: look at the character)", headIndex);
+	g_armIndex = armIndex;
+	_MESSAGE("experiment: ready. Press F7 (head, entry %u) or F8 (left arm, entry %u) to run it for 10 s. Nothing is written until you press a key.",
+			 headIndex, armIndex);
+	if(!started)
+	{
+		started = true;
+		HANDLE t = CreateThread(NULL, 0, KeyThread, NULL, 0, NULL);
+		if(t) CloseHandle(t);
+	}
 }

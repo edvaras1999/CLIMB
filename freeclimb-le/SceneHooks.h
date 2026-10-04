@@ -11,7 +11,9 @@ void SceneHooksSetTarget(unsigned root, unsigned flat);
 // Arranca uma thread que, durante ~40 s, regista no log quantas chamadas houve por segundo.
 void SceneHooksStartReport();
 
-// Passo 10: experiencia de escrita. Depois de ~8 s, e durante 10 s, a rotacao local do osso
-// "NPC Head [Head]" e alterada (balanca) imediatamente antes da passagem de atualizacao e
-// restaurada logo a seguir. 'headIndex' e o indice da entrada da tabela achatada.
-void SceneHooksStartExperiment(unsigned headIndex);
+// Passo 11: experiencia de escrita CONTROLADA POR TECLA. O plugin so escreve quando o
+// utilizador carrega em F7 (cabeca) ou F8 (braco esquerdo): durante 10 s o osso descreve um
+// movimento circular amplo, escrito na entrada da tabela achatada imediatamente antes da
+// atualizacao do esqueleto e restaurado logo a seguir. Sem tecla, nao escreve nada.
+// Os indices sao os das entradas da tabela achatada (0xFFFFFFFF = osso nao encontrado).
+void SceneHooksStartExperiment(unsigned headIndex, unsigned armIndex);

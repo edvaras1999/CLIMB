@@ -538,7 +538,7 @@ namespace
 			// Todas as entradas, uma linha cada: indice, pai, flags, no, nome. Para parar no fim real
 			// do array: uma entrada sem rotacao valida e sem nome legivel.
 			const unsigned entries = Rd32(ctx.flattened + 0xC0);
-			unsigned shown = 0, lastGood = 0, headIndex = 0xFFFFFFFF;
+			unsigned shown = 0, lastGood = 0, headIndex = 0xFFFFFFFF, armIndex = 0xFFFFFFFF;
 			_MESSAGE("scene: --- ALL flat entries (index parent flags node name) ---");
 			for(unsigned i = 0; i < 1024 && entries; ++i)
 			{
@@ -551,12 +551,13 @@ namespace
 				if(entryName[0] == 0 && rotErr > 0.01f) { _MESSAGE("scene: E[%u] looks past the end (no name, rotErr=%.3f) - stop", i, rotErr); break; }
 
 				if(_stricmp(entryName, "NPC Head [Head]") == 0 && Rd32(e + 0x70)) headIndex = i;
+				if(_stricmp(entryName, "NPC L UpperArm [LUar]") == 0 && Rd32(e + 0x70)) armIndex = i;
 				_MESSAGE("scene: E %u %d %08X %08X '%s'", i, (int)(short)Rd16(e + 0x68), Rd32(e + 0x6C), Rd32(e + 0x70), entryName);
 				lastGood = i; ++shown;
 			}
 			_MESSAGE("scene: --- %u entries printed, last index %u ---", shown, lastGood);
-			if(headIndex != 0xFFFFFFFF) SceneHooksStartExperiment(headIndex);
-			else _MESSAGE("experiment: 'NPC Head [Head]' has no node in the flat table - not started");
+			if(headIndex != 0xFFFFFFFF || armIndex != 0xFFFFFFFF) SceneHooksStartExperiment(headIndex, armIndex);
+			else _MESSAGE("experiment: neither 'NPC Head [Head]' nor 'NPC L UpperArm [LUar]' found in the flat table - not started");
 		}
 
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));
