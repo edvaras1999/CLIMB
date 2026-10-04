@@ -168,29 +168,27 @@ namespace
 		const char *	mangled;
 		const char *	label;
 		unsigned		bytes;		// quantos bytes de cada funcao
+		unsigned		firstSlot;
+		unsigned		lastSlot;
 	};
 
+	// Passo 7: so as funcoes que interessam, e muito mais bytes de cada (a funcao inteira).
 	const DumpTarget kDump[] =
 	{
-		{ ".?AVNiAVObject@@",				"NiAVObject",				192 },
-		{ ".?AVNiNode@@",					"NiNode",					192 },
-		{ "@0114D988",						"BSFadeNode (no RTTI)",		192 },
-		{ ".?AVBSFlattenedBoneTree@@",		"BSFlattenedBoneTree",		192 },
-		{ ".?AVPlayerCharacter@@",			"PlayerCharacter",			128 },
-		{ ".?AVActor@@",					"Actor",					128 },
-		{ ".?AVBSWin32KeyboardDevice@@",	"BSWin32KeyboardDevice",	128 },
-		{ ".?AVBSWin32GamepadDevice@@",		"BSWin32GamepadDevice",		128 },
-		{ ".?AVBSGamepadDevice@@",			"BSGamepadDevice",			128 },
-		{ ".?AVThirdPersonState@@",			"ThirdPersonState",			128 },
-		{ ".?AVFirstPersonState@@",			"FirstPersonState",			128 },
-		{ ".?AVPlayerInputHandler@@",		"PlayerInputHandler",		128 },
+		{ ".?AVNiAVObject@@",				"NiAVObject",				1400, 0x27, 0x32 },
+		{ ".?AVNiNode@@",					"NiNode",					1400, 0x27, 0x32 },
+		{ "@0114D988",						"BSFadeNode (no RTTI)",		1400, 0x27, 0x32 },
+		{ ".?AVBSFlattenedBoneTree@@",		"BSFlattenedBoneTree",		1400, 0x27, 0x32 },
+		{ ".?AVBSWin32KeyboardDevice@@",	"BSWin32KeyboardDevice",	400,  0,    0xFFFF },
+		{ ".?AVThirdPersonState@@",			"ThirdPersonState",			700,  0,    0xFFFF },
+		{ ".?AVFirstPersonState@@",			"FirstPersonState",			700,  0,    0xFFFF },
 	};
 
 	void DumpVtablesToFile(const std::vector<vt::Region> & regions, unsigned codeLo, unsigned codeHi)
 	{
 		std::string out;
 		out.reserve(300 * 1024);
-		out += "# FreeClimb LE - vtable dump (passo 4)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
+		out += "# FreeClimb LE - vtable dump (passo 7)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
 		out += "# EXT = o slot aponta para fora do TESV.exe (outro plugin interceptou-o)\n";
 
 		unsigned classes = 0, functions = 0, external = 0;
@@ -229,7 +227,8 @@ namespace
 						kDump[k].label, primary->vtable, primary->slots, kDump[k].bytes);
 			out += head;
 
-			for(unsigned s = 0; s < primary->slots; ++s)
+			const unsigned last = kDump[k].lastSlot < primary->slots ? kDump[k].lastSlot : primary->slots - 1;
+			for(unsigned s = kDump[k].firstSlot; s <= last; ++s)
 			{
 				const unsigned fn = *(const unsigned *)(primary->vtable + 4 * s);
 				char line[64];
@@ -422,6 +421,26 @@ namespace
 		}
 	}
 
+	// Formato deduzido do LE: entradas de 0x78 bytes, num array apontado por flat+0xC0:
+	//   +00 NiTransform local (52 bytes)   +34 NiTransform world (52 bytes)
+	//   +68 int16 parentIndex   +6A int16 ?   +6C uint32 flags   +70 NiAVObject* node   +74 const char* name
+	void PrintFlatEntry(const std::vector<vt::Region> & regions, unsigned lo, unsigned hi, unsigned base, unsigned index)
+	{
+		const unsigned e = base + index * 0x78;
+		if(!Readable(e, 0x78)) { _MESSAGE("scene:   entry %u at %08X unreadable", index, e); return; }
+
+		const unsigned node = Rd32(e + 0x70);
+		char cls[112] = "-";
+		if(node && Readable(node, 8)) ClassOf(regions, lo, hi, node, cls, sizeof(cls));
+		char nodeName[48] = "", entryName[48] = "";
+		if(node && Readable(node + 8, 4)) AsciiAt(Rd32(node + 8), nodeName, sizeof(nodeName));
+		AsciiAt(Rd32(e + 0x74), entryName, sizeof(entryName));
+
+		_MESSAGE("scene:   [%3u] parent=%d/%d flags=%08X node=%08X %s '%s' name='%s'  rotErr local=%.4f world=%.4f  local t=(%.1f %.1f %.1f)",
+				 index, (int)(short)Rd16(e + 0x68), (int)(short)Rd16(e + 0x6A), Rd32(e + 0x6C), node, cls, nodeName, entryName,
+				 RotationError(e), RotationError(e + 0x34), RdF(e + 0x24), RdF(e + 0x28), RdF(e + 0x2C));
+	}
+
 	void ProbeScene()
 	{
 		const DWORD t0 = GetTickCount();
@@ -491,6 +510,25 @@ namespace
 			_MESSAGE("scene: no BSFlattenedBoneTree found in the third-person tree");
 		}
 
+		if(ctx.flattened)
+		{
+			const unsigned countA = Rd32(ctx.flattened + 0xB8), countB = Rd32(ctx.flattened + 0xBC);
+			const unsigned entries = Rd32(ctx.flattened + 0xC0);
+			_MESSAGE("scene: --- flat entries: +0xB8=%u +0xBC=%u array=%08X ---", countA, countB, entries);
+			if(entries && countB > 0 && countB < 4096)
+			{
+				for(unsigned i = 0; i < 6 && i < countB; ++i) PrintFlatEntry(regions, codeLo, codeHi, entries, i);
+				_MESSAGE("scene:   ... last entries (by +0xBC):");
+				for(unsigned i = countB > 4 ? countB - 4 : 0; i < countB; ++i) PrintFlatEntry(regions, codeLo, codeHi, entries, i);
+				if(countA > countB && countA < 4096)
+				{
+					_MESSAGE("scene:   ... entries just past +0xBC (to see whether the count is right):");
+					PrintFlatEntry(regions, codeLo, codeHi, entries, countB);
+					PrintFlatEntry(regions, codeLo, codeHi, entries, countB + 1);
+				}
+			}
+		}
+
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));
 	}
 
@@ -503,6 +541,15 @@ namespace
 		if(!Collect(regions, codeLo, codeHi))
 		{
 			_MESSAGE("rtti: could not read the executable's sections");
+			return;
+		}
+
+		// Os enderecos ja foram todos descobertos (passos 3 a 6): so falta o despejo das funcoes.
+		const bool kVerboseRtti = false;
+		if(!kVerboseRtti)
+		{
+			DumpVtablesToFile(regions, codeLo, codeHi);
+			_MESSAGE("rtti: quick mode, done in %u ms", (unsigned)(GetTickCount() - t0));
 			return;
 		}
 
@@ -591,7 +638,7 @@ namespace
 	DWORD WINAPI RetryThread(LPVOID)
 	{
 		Sleep(12000);	// da tempo ao jogo para carregar o personagem
-		_MESSAGE("scene: retrying after 12 s");
+		_MESSAGE("scene: probing the player's skeleton (read-only)...");
 		SafeProbe();
 		return 0;
 	}
@@ -602,10 +649,9 @@ void ReportScene()
 	static int calls = 0;
 	if(++calls > 2) return;		// so as duas primeiras cargas de save
 
-	_MESSAGE("scene: probing the player's skeleton (read-only)...");
-	SafeProbe();
-
-	// o personagem pode ainda nao ter 3D logo apos a mensagem: repete uma vez mais tarde
+	// A leitura corre numa thread propria, 12 s depois: a thread principal nao pode parar
+	// no momento em que o jogo carrega o save (e quando os scripts de Papyrus arrancam).
+	_MESSAGE("scene: the skeleton probe is scheduled for 12 s from now (off the main thread)");
 	HANDLE t = CreateThread(NULL, 0, RetryThread, NULL, 0, NULL);
 	if(t) CloseHandle(t);
 }
