@@ -20,7 +20,7 @@
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.11.1 (passo 11: experiencia por tecla F7/F8)"
+#define PLUGIN_VERSION_STRING	"0.12.0 (passo 12: experiencia automatica e medida)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;

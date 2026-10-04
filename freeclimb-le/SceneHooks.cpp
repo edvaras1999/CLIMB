@@ -123,6 +123,52 @@ namespace
 		InterlockedExchange(&g_inExp, 0);
 	}
 
+	// ---- medicao: quanto mudou a rotacao MUNDIAL do osso do braco durante a escrita ----
+	volatile float		g_maxEntryDeg = 0, g_maxNodeDeg = 0;
+	float				g_snapEntry[9], g_snapNode[9];
+	volatile LONG		g_snapValid = 0, g_measured = 0;
+
+	float AngleDeg(const float * A, const float * B)
+	{
+		float tr = 0;
+		for(int i = 0; i < 9; ++i) tr += A[i] * B[i];
+		float c = (tr - 1.0f) * 0.5f;
+		if(c > 1.0f) c = 1.0f;
+		if(c < -1.0f) c = -1.0f;
+		return acosf(c) * 57.29578f;
+	}
+
+	// Chamada logo depois da atualizacao do esqueleto do jogador.
+	void Measure(unsigned flat, bool applied)
+	{
+		if(g_armIndex == 0xFFFFFFFF || !ReadableMem(flat + 0xB8, 12)) return;
+		const unsigned count = *(const unsigned *)(flat + 0xB8), entries = *(const unsigned *)(flat + 0xC0);
+		if(!entries || g_armIndex >= count) return;
+
+		const unsigned e = entries + g_armIndex * 0x78;
+		if(!ReadableMem(e, 0x78)) return;
+
+		const float * entryWorld = (const float *)(e + 0x34);			// rotacao mundial da entrada
+		const unsigned node = *(const unsigned *)(e + 0x70);
+		const float * nodeWorld = (node && ReadableMem(node + 0x54, 36)) ? (const float *)(node + 0x54) : NULL;
+
+		if(!applied)
+		{
+			// sem escrita: guarda a rotacao "normal" do osso (a referencia para comparar)
+			memcpy(g_snapEntry, entryWorld, 36);
+			if(nodeWorld) memcpy(g_snapNode, nodeWorld, 36); else memset(g_snapNode, 0, 36);
+			g_snapValid = 1;
+			return;
+		}
+
+		if(!g_snapValid) return;
+		const float de = AngleDeg(g_snapEntry, entryWorld);
+		const float dn = nodeWorld ? AngleDeg(g_snapNode, nodeWorld) : 0.0f;
+		if(de > g_maxEntryDeg) g_maxEntryDeg = de;
+		if(dn > g_maxNodeDeg) g_maxNodeDeg = dn;
+		InterlockedIncrement(&g_measured);
+	}
+
 	typedef void (__thiscall * Fn2)(void *, void *, unsigned);	// (this, dados, flags)  ret 8
 	typedef void (__thiscall * Fn1)(void *, void *);			// (this, dados)         ret 4
 
@@ -151,6 +197,7 @@ namespace
 
 			original(self, data, flags);
 
+			if((unsigned)self == g_playerFlat && g_playerFlat) Measure((unsigned)self, applied);
 			if(applied) EndExperiment(entry, saved);
 		}
 	};
@@ -201,7 +248,7 @@ namespace
 	{
 		LONG lastRoot[kKinds] = { 0 }, lastFlat[kKinds] = { 0 };
 
-		for(int round = 1; round <= 24; ++round)
+		for(int round = 1; round <= 3; ++round)
 		{
 			Sleep(5000);
 
@@ -222,9 +269,6 @@ namespace
 				m += _snprintf_s(threads + m, sizeof(threads) - m, _TRUNCATE, " %lu", (unsigned long)g_threads[i]);
 			_MESSAGE("hooks:   threads that updated the player's skeleton:%s   (plugin was loaded on thread %lu)",
 					 threads, (unsigned long)g_loadThread);
-			if(g_expStart)
-				_MESSAGE("experiment: applied %ld times so far, skipped %ld  (%s)", g_expApplied, g_expSkipped,
-						 GetTickCount() <= g_expEnd ? "RUNNING" : "idle");
 		}
 		return 0;
 	}
@@ -267,28 +311,26 @@ void SceneHooksStartReport()
 
 namespace
 {
-	DWORD WINAPI KeyThread(LPVOID)
+	DWORD WINAPI CycleThread(LPVOID)
 	{
-		bool wasHead = false, wasArm = false;
-		for(;;)
-		{
-			Sleep(40);
-			const bool head = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
-			const bool arm  = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-			const DWORD now = GetTickCount();
+		Sleep(8000);
 
-			if(head && !wasHead && g_headIndex != 0xFFFFFFFF)
-			{
-				g_activeIndex = g_headIndex; g_expApplied = 0; g_expSkipped = 0; g_expStart = now; g_expEnd = now + 10000;
-				_MESSAGE("experiment: F7 pressed - head (entry %u) circular motion for 10 s", g_headIndex);
-			}
-			if(arm && !wasArm && g_armIndex != 0xFFFFFFFF)
-			{
-				g_activeIndex = g_armIndex; g_expApplied = 0; g_expSkipped = 0; g_expStart = now; g_expEnd = now + 10000;
-				_MESSAGE("experiment: F8 pressed - left upper arm (entry %u) circular motion for 10 s", g_armIndex);
-			}
-			wasHead = head; wasArm = arm;
+		for(int cycle = 1; cycle <= 6; ++cycle)
+		{
+			const DWORD now = GetTickCount();
+			g_activeIndex = g_armIndex;
+			g_expApplied = 0; g_expSkipped = 0; g_maxEntryDeg = 0; g_maxNodeDeg = 0; g_measured = 0;
+			g_expStart = now; g_expEnd = now + 6000;
+			_MESSAGE("experiment: cycle %d ON  - the LEFT ARM should swing in circles for 6 s", cycle);
+
+			Sleep(6500);
+			_MESSAGE("experiment: cycle %d OFF - writes applied %ld, skipped %ld, measured %ld; max change of the arm's WORLD rotation: entry.world %.1f deg, node.world %.1f deg",
+					 cycle, g_expApplied, g_expSkipped, g_measured, (double)g_maxEntryDeg, (double)g_maxNodeDeg);
+
+			Sleep(6000);
 		}
+		_MESSAGE("experiment: all cycles done");
+		return 0;
 	}
 }
 
@@ -297,12 +339,14 @@ void SceneHooksStartExperiment(unsigned headIndex, unsigned armIndex)
 	static bool started = false;
 	g_headIndex = headIndex;
 	g_armIndex = armIndex;
-	_MESSAGE("experiment: ready. Press F7 (head, entry %u) or F8 (left arm, entry %u) to run it for 10 s. Nothing is written until you press a key.",
-			 headIndex, armIndex);
+
+	if(armIndex == 0xFFFFFFFF) { _MESSAGE("experiment: 'NPC L UpperArm [LUar]' not found - not started"); return; }
+
+	_MESSAGE("experiment: automatic, left upper arm = flat entry %u. In ~8 s the arm swings 6 s / rests 6 s, 6 times. Stand still in third person and watch the left arm.", armIndex);
 	if(!started)
 	{
 		started = true;
-		HANDLE t = CreateThread(NULL, 0, KeyThread, NULL, 0, NULL);
+		HANDLE t = CreateThread(NULL, 0, CycleThread, NULL, 0, NULL);
 		if(t) CloseHandle(t);
 	}
 }
