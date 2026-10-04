@@ -10,6 +10,7 @@
 
 #include "common/IDebugLog.h"
 #include "RttiReport.h"
+#include "SceneHooks.h"
 #include "VtableScan.h"
 
 namespace
@@ -528,6 +529,9 @@ namespace
 				}
 			}
 		}
+
+		SceneHooksSetTarget(third, ctx.flattened);
+		SceneHooksStartReport();
 
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));
 	}

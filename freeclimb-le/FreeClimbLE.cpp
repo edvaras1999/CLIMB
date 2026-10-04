@@ -15,11 +15,12 @@
 #include "Log.h"
 #include "PackLoader.h"
 #include "RttiReport.h"
+#include "SceneHooks.h"
 
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.7.0 (passo 7: funcoes completas e entradas achatadas)"
+#define PLUGIN_VERSION_STRING	"0.8.0 (passo 8: interceptadores de passagem)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
@@ -142,6 +143,7 @@ namespace
 				CheckModFiles();
 				LoadAnimations();
 				ReportRtti();
+				InstallSceneHooks();
 				break;
 
 			case SKSEMessagingInterface::kMessage_InputLoaded:

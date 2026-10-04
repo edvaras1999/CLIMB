@@ -114,6 +114,7 @@
     <ClCompile Include="FreeClimbLE.cpp" />
     <ClCompile Include="VtableScan.cpp" />
     <ClCompile Include="RttiReport.cpp" />
+    <ClCompile Include="SceneHooks.cpp" />
     <ClCompile Include="PackLoader.cpp">
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ForcedIncludeFiles></ForcedIncludeFiles>
@@ -158,6 +159,7 @@
     <ClInclude Include="PackLoader.h" />
     <ClInclude Include="VtableScan.h" />
     <ClInclude Include="RttiReport.h" />
+    <ClInclude Include="SceneHooks.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="FreeClimbLE.rc" />
