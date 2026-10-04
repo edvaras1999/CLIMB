@@ -10,3 +10,8 @@ void SceneHooksSetTarget(unsigned root, unsigned flat);
 
 // Arranca uma thread que, durante ~40 s, regista no log quantas chamadas houve por segundo.
 void SceneHooksStartReport();
+
+// Passo 10: experiencia de escrita. Depois de ~8 s, e durante 10 s, a rotacao local do osso
+// "NPC Head [Head]" e alterada (balanca) imediatamente antes da passagem de atualizacao e
+// restaurada logo a seguir. 'headIndex' e o indice da entrada da tabela achatada.
+void SceneHooksStartExperiment(unsigned headIndex);
