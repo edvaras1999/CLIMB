@@ -50,10 +50,14 @@ namespace
 		else if(s == g_playerRoot && s)	{ InterlockedIncrement(&g_rootCalls[kind]); NoteThread(); }
 	}
 
-	// ---- experiencia de escrita (passo 10) ----
-	volatile unsigned	g_headIndex = 0xFFFFFFFF, g_armIndex = 0xFFFFFFFF, g_activeIndex = 0xFFFFFFFF;
+	// ---- experiencia de escrita: LEVITACAO do corpo todo (osso "NPC COM [COM ]", indice 0) ----
+	volatile unsigned	g_comIndex = 0xFFFFFFFF;
 	volatile DWORD		g_expStart = 0, g_expEnd = 0;
-	volatile LONG		g_inExp = 0, g_expApplied = 0, g_expSkipped = 0;
+	volatile LONG		g_inExp = 0, g_expApplied = 0, g_expSkipped = 0, g_measured = 0;
+	volatile float		g_maxDzEntry = 0, g_maxDzNode = 0;
+	float				g_snapZEntry = 0, g_snapZNode = 0;
+	volatile LONG		g_snapValid = 0;
+	const float			kLiftUnits = 60.0f;			// ~0,85 m (1 unidade do Skyrim ~ 1,4 cm)
 
 	bool ReadableMem(unsigned address, unsigned size)
 	{
@@ -72,46 +76,32 @@ namespace
 		return true;
 	}
 
-	// Escreve a rotacao alterada na ENTRADA da tabela achatada do osso da cabeca (e nao no no):
-	// quando um osso tem entrada, e a entrada que o jogo usa (no FreeClimb: local() = flat ? *flat : node->local).
-	// Devolve true se escreveu (e preencheu 'saved' e 'entryOut').
+	// Soma uma altura a translacao LOCAL do osso do centro do corpo, na ENTRADA da tabela achatada
+	// (quando um osso tem entrada, e a entrada que o jogo usa). Sobe e desce uma vez em 6 s.
 	bool BeginExperiment(void * flat, float * saved, unsigned * entryOut)
 	{
 		const DWORD now = GetTickCount();
-		if(!g_expStart || now < g_expStart || now > g_expEnd || g_activeIndex == 0xFFFFFFFF) return false;
+		if(!g_expStart || now < g_expStart || now > g_expEnd || g_comIndex == 0xFFFFFFFF) return false;
 
 		const unsigned f = (unsigned)flat;
 		if(!ReadableMem(f + 0xB8, 12)) { InterlockedIncrement(&g_expSkipped); return false; }
 
 		const unsigned count   = *(const unsigned *)(f + 0xB8);
 		const unsigned entries = *(const unsigned *)(f + 0xC0);
-		if(!entries || g_activeIndex >= count) { InterlockedIncrement(&g_expSkipped); return false; }
+		if(!entries || g_comIndex >= count) { InterlockedIncrement(&g_expSkipped); return false; }
 
-		const unsigned entry = entries + g_activeIndex * 0x78;
+		const unsigned entry = entries + g_comIndex * 0x78;
 		if(!ReadableMem(entry, 0x78)) { InterlockedIncrement(&g_expSkipped); return false; }
 
 		if(InterlockedCompareExchange(&g_inExp, 1, 0) != 0) return false;	// outra thread ja esta dentro
 
-		float * rot = (float *)entry;										// NiTransform local: rotacao 3x3 em +0x00
-		memcpy(saved, rot, 9 * sizeof(float));
+		float * translate = (float *)(entry + 0x24);						// NiTransform local: translacao em +0x24
+		memcpy(saved, translate, 3 * sizeof(float));
 
-		// movimento circular amplo (cone de ~40 graus, 0.5 Hz): Rz(a) * Ry(b)
-		const float t = (float)(now - g_expStart) / 1000.0f;
-		const float a = 0.7f * sinf(t * 3.1416f), bAngle = 0.7f * cosf(t * 3.1416f);
-		const float ca = cosf(a), sa = sinf(a), cb = cosf(bAngle), sb = sinf(bAngle);
-		const float Rz[9] = { ca, -sa, 0, sa, ca, 0, 0, 0, 1 };
-		const float Ry[9] = { cb, 0, sb, 0, 1, 0, -sb, 0, cb };
-		float R[9];
-		for(int i = 0; i < 3; ++i)
-			for(int j = 0; j < 3; ++j)
-				R[i * 3 + j] = Rz[i * 3 + 0] * Ry[0 * 3 + j] + Rz[i * 3 + 1] * Ry[1 * 3 + j] + Rz[i * 3 + 2] * Ry[2 * 3 + j];
+		float t = (float)(now - g_expStart) / 6000.0f;						// 0..1 ao longo dos 6 s
+		if(t > 1.0f) t = 1.0f;
+		translate[2] = saved[2] + kLiftUnits * sinf(t * 3.14159265f);		// z = para cima
 
-		float out[9];	// nova rotacao = antiga * R
-		for(int i = 0; i < 3; ++i)
-			for(int j = 0; j < 3; ++j)
-				out[i * 3 + j] = saved[i * 3 + 0] * R[0 * 3 + j] + saved[i * 3 + 1] * R[1 * 3 + j] + saved[i * 3 + 2] * R[2 * 3 + j];
-
-		memcpy(rot, out, 9 * sizeof(float));
 		*entryOut = entry;
 		InterlockedIncrement(&g_expApplied);
 		return true;
@@ -119,53 +109,34 @@ namespace
 
 	void EndExperiment(unsigned entry, const float * saved)
 	{
-		if(ReadableMem(entry, 9 * sizeof(float))) memcpy((void *)entry, saved, 9 * sizeof(float));
+		if(ReadableMem(entry + 0x24, 3 * sizeof(float))) memcpy((void *)(entry + 0x24), saved, 3 * sizeof(float));
 		InterlockedExchange(&g_inExp, 0);
 	}
 
-	// ---- medicao: quanto mudou a rotacao MUNDIAL do osso do braco durante a escrita ----
-	volatile float		g_maxEntryDeg = 0, g_maxNodeDeg = 0;
-	float				g_snapEntry[9], g_snapNode[9];
-	volatile LONG		g_snapValid = 0, g_measured = 0;
-
-	float AngleDeg(const float * A, const float * B)
-	{
-		float tr = 0;
-		for(int i = 0; i < 9; ++i) tr += A[i] * B[i];
-		float c = (tr - 1.0f) * 0.5f;
-		if(c > 1.0f) c = 1.0f;
-		if(c < -1.0f) c = -1.0f;
-		return acosf(c) * 57.29578f;
-	}
-
-	// Chamada logo depois da atualizacao do esqueleto do jogador.
+	// Depois da atualizacao: mede quanto subiu a posicao MUNDIAL do osso (entrada e no).
 	void Measure(unsigned flat, bool applied)
 	{
-		if(g_armIndex == 0xFFFFFFFF || !ReadableMem(flat + 0xB8, 12)) return;
+		if(g_comIndex == 0xFFFFFFFF || !ReadableMem(flat + 0xB8, 12)) return;
 		const unsigned count = *(const unsigned *)(flat + 0xB8), entries = *(const unsigned *)(flat + 0xC0);
-		if(!entries || g_armIndex >= count) return;
+		if(!entries || g_comIndex >= count) return;
 
-		const unsigned e = entries + g_armIndex * 0x78;
+		const unsigned e = entries + g_comIndex * 0x78;
 		if(!ReadableMem(e, 0x78)) return;
 
-		const float * entryWorld = (const float *)(e + 0x34);			// rotacao mundial da entrada
+		const float zEntry = *(const float *)(e + 0x60);					// translacao mundial z da entrada
 		const unsigned node = *(const unsigned *)(e + 0x70);
-		const float * nodeWorld = (node && ReadableMem(node + 0x54, 36)) ? (const float *)(node + 0x54) : NULL;
+		const float zNode = (node && ReadableMem(node + 0x80, 4)) ? *(const float *)(node + 0x80) : 0.0f;
 
 		if(!applied)
 		{
-			// sem escrita: guarda a rotacao "normal" do osso (a referencia para comparar)
-			memcpy(g_snapEntry, entryWorld, 36);
-			if(nodeWorld) memcpy(g_snapNode, nodeWorld, 36); else memset(g_snapNode, 0, 36);
-			g_snapValid = 1;
+			g_snapZEntry = zEntry; g_snapZNode = zNode; g_snapValid = 1;
 			return;
 		}
-
 		if(!g_snapValid) return;
-		const float de = AngleDeg(g_snapEntry, entryWorld);
-		const float dn = nodeWorld ? AngleDeg(g_snapNode, nodeWorld) : 0.0f;
-		if(de > g_maxEntryDeg) g_maxEntryDeg = de;
-		if(dn > g_maxNodeDeg) g_maxNodeDeg = dn;
+
+		const float de = zEntry - g_snapZEntry, dn = (node ? zNode - g_snapZNode : 0.0f);
+		if(de > g_maxDzEntry) g_maxDzEntry = de;
+		if(dn > g_maxDzNode)  g_maxDzNode = dn;
 		InterlockedIncrement(&g_measured);
 	}
 
@@ -315,34 +286,32 @@ namespace
 	{
 		Sleep(8000);
 
-		for(int cycle = 1; cycle <= 6; ++cycle)
+		for(int cycle = 1; cycle <= 4; ++cycle)
 		{
 			const DWORD now = GetTickCount();
-			g_activeIndex = g_armIndex;
-			g_expApplied = 0; g_expSkipped = 0; g_maxEntryDeg = 0; g_maxNodeDeg = 0; g_measured = 0;
+			g_expApplied = 0; g_expSkipped = 0; g_maxDzEntry = 0; g_maxDzNode = 0; g_measured = 0;
 			g_expStart = now; g_expEnd = now + 6000;
-			_MESSAGE("experiment: cycle %d ON  - the LEFT ARM should swing in circles for 6 s", cycle);
+			_MESSAGE("experiment: cycle %d ON  - the WHOLE BODY should rise about half a metre and come back down over 6 s (levitation)", cycle);
 
 			Sleep(6500);
-			_MESSAGE("experiment: cycle %d OFF - writes applied %ld, skipped %ld, measured %ld; max change of the arm's WORLD rotation: entry.world %.1f deg, node.world %.1f deg",
-					 cycle, g_expApplied, g_expSkipped, g_measured, (double)g_maxEntryDeg, (double)g_maxNodeDeg);
+			_MESSAGE("experiment: cycle %d OFF - writes applied %ld, skipped %ld, measured %ld; max rise of the bone's WORLD height: entry %.1f units, node %.1f units (wrote up to %.0f)",
+					 cycle, g_expApplied, g_expSkipped, g_measured, (double)g_maxDzEntry, (double)g_maxDzNode, (double)kLiftUnits);
 
-			Sleep(6000);
+			Sleep(8000);
 		}
 		_MESSAGE("experiment: all cycles done");
 		return 0;
 	}
 }
 
-void SceneHooksStartExperiment(unsigned headIndex, unsigned armIndex)
+void SceneHooksStartExperiment(unsigned comIndex)
 {
 	static bool started = false;
-	g_headIndex = headIndex;
-	g_armIndex = armIndex;
+	g_comIndex = comIndex;
 
-	if(armIndex == 0xFFFFFFFF) { _MESSAGE("experiment: 'NPC L UpperArm [LUar]' not found - not started"); return; }
+	if(comIndex == 0xFFFFFFFF) { _MESSAGE("experiment: 'NPC COM [COM ]' not found - not started"); return; }
 
-	_MESSAGE("experiment: automatic, left upper arm = flat entry %u. In ~8 s the arm swings 6 s / rests 6 s, 6 times. Stand still in third person and watch the left arm.", armIndex);
+	_MESSAGE("experiment: automatic, centre-of-body bone = flat entry %u. In ~8 s the whole body should float up ~0.85 m and back, 4 times (6 s up-and-down, 8 s rest). Stand still in third person.", comIndex);
 	if(!started)
 	{
 		started = true;
