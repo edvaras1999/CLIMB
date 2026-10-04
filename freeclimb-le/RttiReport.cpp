@@ -533,6 +533,29 @@ namespace
 		SceneHooksSetTarget(third, ctx.flattened);
 		SceneHooksStartReport();
 
+		if(ctx.flattened)
+		{
+			// Todas as entradas, uma linha cada: indice, pai, flags, no, nome. Para parar no fim real
+			// do array: uma entrada sem rotacao valida e sem nome legivel.
+			const unsigned entries = Rd32(ctx.flattened + 0xC0);
+			unsigned shown = 0, lastGood = 0;
+			_MESSAGE("scene: --- ALL flat entries (index parent flags node name) ---");
+			for(unsigned i = 0; i < 1024 && entries; ++i)
+			{
+				const unsigned e = entries + i * 0x78;
+				if(!Readable(e, 0x78)) { _MESSAGE("scene: E[%u] unreadable - stop", i); break; }
+
+				char entryName[64];
+				AsciiAt(Rd32(e + 0x74), entryName, sizeof(entryName));
+				const float rotErr = RotationError(e) + RotationError(e + 0x34);
+				if(entryName[0] == 0 && rotErr > 0.01f) { _MESSAGE("scene: E[%u] looks past the end (no name, rotErr=%.3f) - stop", i, rotErr); break; }
+
+				_MESSAGE("scene: E %u %d %08X %08X '%s'", i, (int)(short)Rd16(e + 0x68), Rd32(e + 0x6C), Rd32(e + 0x70), entryName);
+				lastGood = i; ++shown;
+			}
+			_MESSAGE("scene: --- %u entries printed, last index %u ---", shown, lastGood);
+		}
+
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));
 	}
 

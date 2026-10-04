@@ -21,8 +21,10 @@ namespace
 	const unsigned	kSlot[kKinds]		= { 0x29, 0x2A, 0x2B, 0x2E, 0x2D };
 	const char *	kKindName[kKinds]	= { "downward(0x29)", "selected(0x2A)", "rigid(0x2B)", "transform(0x2E)", "world(0x2D)" };
 
-	volatile LONG		g_calls[kKinds];			// todas as chamadas
-	volatile LONG		g_playerCalls[kKinds];		// so as do esqueleto do jogador
+	// So conta o esqueleto do jogador (a raiz e a tabela achatada, em separado):
+	// contar todas as chamadas do jogo custava ~300 mil operacoes atomicas por segundo.
+	volatile LONG		g_rootCalls[kKinds];
+	volatile LONG		g_flatCalls[kKinds];
 	volatile unsigned	g_playerRoot = 0, g_playerFlat = 0;
 	volatile DWORD		g_threads[8];
 	volatile LONG		g_threadCount = 0;
@@ -41,14 +43,9 @@ namespace
 
 	inline void Count(int kind, void * self)
 	{
-		InterlockedIncrement(&g_calls[kind]);
-
 		const unsigned s = (unsigned)self;
-		if(s && (s == g_playerFlat || s == g_playerRoot))
-		{
-			InterlockedIncrement(&g_playerCalls[kind]);
-			NoteThread();
-		}
+		if(s == g_playerFlat && s)		{ InterlockedIncrement(&g_flatCalls[kind]); NoteThread(); }
+		else if(s == g_playerRoot && s)	{ InterlockedIncrement(&g_rootCalls[kind]); NoteThread(); }
 	}
 
 	typedef void (__thiscall * Fn2)(void *, void *, unsigned);	// (this, dados, flags)  ret 8
@@ -108,19 +105,19 @@ namespace
 
 	DWORD WINAPI ReportThread(LPVOID)
 	{
-		LONG lastAll[kKinds] = { 0 }, lastPlayer[kKinds] = { 0 };
+		LONG lastRoot[kKinds] = { 0 }, lastFlat[kKinds] = { 0 };
 
-		for(int round = 1; round <= 8; ++round)
+		for(int round = 1; round <= 6; ++round)
 		{
 			Sleep(5000);
 
 			char line[400];
-			int n = _snprintf_s(line, sizeof(line), _TRUNCATE, "hooks: after %d s, calls per second (all / player's skeleton):", round * 5);
+			int n = _snprintf_s(line, sizeof(line), _TRUNCATE, "hooks: after %d s, calls per second (root / flat tree):", round * 5);
 			for(int k = 0; k < kKinds && n > 0; ++k)
 			{
-				const LONG a = g_calls[k], p = g_playerCalls[k];
-				n += _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "  %s %ld/%ld", kKindName[k], (a - lastAll[k]) / 5, (p - lastPlayer[k]) / 5);
-				lastAll[k] = a; lastPlayer[k] = p;
+				const LONG r = g_rootCalls[k], f = g_flatCalls[k];
+				n += _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "  %s %ld/%ld", kKindName[k], (r - lastRoot[k]) / 5, (f - lastFlat[k]) / 5);
+				lastRoot[k] = r; lastFlat[k] = f;
 			}
 			_MESSAGE("%s", line);
 
