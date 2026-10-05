@@ -710,7 +710,7 @@ namespace
 
 void ReportScene()
 {
-	const bool kSceneProbeEnabled = false;		// passo 14: sem sonda nem experiencias no jogo
+	const bool kSceneProbeEnabled = true;
 	if(!kSceneProbeEnabled) return;
 
 	static int calls = 0;

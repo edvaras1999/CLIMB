@@ -20,7 +20,7 @@
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.15.0 (passo 15: funcoes auxiliares e shaders)"
+#define PLUGIN_VERSION_STRING	"0.16.0 (passo 16: levitacao escrevendo as posicoes mundiais)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
@@ -143,7 +143,7 @@ namespace
 				CheckModFiles();
 				LoadAnimations();
 				ReportRtti();
-				// InstallSceneHooks();   // passo 14: desligado enquanto se procura o ponto da pele
+				InstallSceneHooks();
 				break;
 
 			case SKSEMessagingInterface::kMessage_InputLoaded:

@@ -50,14 +50,16 @@ namespace
 		else if(s == g_playerRoot && s)	{ InterlockedIncrement(&g_rootCalls[kind]); NoteThread(); }
 	}
 
-	// ---- experiencia de escrita: LEVITACAO do corpo todo (osso "NPC COM [COM ]", indice 0) ----
-	volatile unsigned	g_comIndex = 0xFFFFFFFF;
+	// ---- experiencia: LEVITACAO escrevendo as posicoes MUNDIAIS, depois da atualizacao ----
+	// Descoberto no passo 15 (0ABDEC0): no fim da passagem o jogo COPIA a transformacao mundial de cada
+	// no para a entrada da tabela achatada. Por isso escrever na rotacao "local" da entrada nao serve
+	// (e so um espelho). Aqui, depois da passagem, somamos uma altura a TODAS as posicoes mundiais
+	// (entrada +0x60 e no +0x80), no meio da pose: o corpo todo sobe, sem contas de hierarquia.
 	volatile DWORD		g_expStart = 0, g_expEnd = 0;
-	volatile LONG		g_inExp = 0, g_expApplied = 0, g_expSkipped = 0, g_measured = 0;
-	volatile float		g_maxDzEntry = 0, g_maxDzNode = 0;
-	float				g_snapZEntry = 0, g_snapZNode = 0;
-	volatile LONG		g_snapValid = 0;
-	const float			kLiftUnits = 60.0f;			// ~0,85 m (1 unidade do Skyrim ~ 1,4 cm)
+	volatile LONG		g_levFrames = 0, g_persisted = 0, g_rewritten = 0;
+	float				g_lastDz = 0, g_lastZE = 0;
+	volatile unsigned	g_comIndex = 0xFFFFFFFF;
+	const float			kLiftUnits = 80.0f;			// ~1,1 m (1 unidade do Skyrim ~ 1,4 cm)
 
 	bool ReadableMem(unsigned address, unsigned size)
 	{
@@ -76,68 +78,66 @@ namespace
 		return true;
 	}
 
-	// Soma uma altura a translacao LOCAL do osso do centro do corpo, na ENTRADA da tabela achatada
-	// (quando um osso tem entrada, e a entrada que o jogo usa). Sobe e desce uma vez em 6 s.
-	bool BeginExperiment(void * flat, float * saved, unsigned * entryOut)
+	bool FlatArray(unsigned flat, unsigned * entries, unsigned * count)
+	{
+		if(!ReadableMem(flat + 0xB8, 12)) return false;
+		*count = *(const unsigned *)(flat + 0xB8);
+		*entries = *(const unsigned *)(flat + 0xC0);
+		return *entries && *count > 0 && *count <= 1024;
+	}
+
+	// Soma 'dz' a altura mundial de todas as entradas e de todos os nos que elas apontam.
+	void AddDz(unsigned flat, float dz)
+	{
+		unsigned entries, count;
+		if(!FlatArray(flat, &entries, &count)) return;
+
+		for(unsigned i = 0; i < count; ++i)
+		{
+			const unsigned e = entries + i * 0x78;
+			if(!ReadableMem(e, 0x78)) return;
+
+			*(float *)(e + 0x60) += dz;										// entrada: world translate z
+
+			const unsigned node = *(const unsigned *)(e + 0x70);
+			if(node && ReadableMem(node + 0x80, 4)) *(float *)(node + 0x80) += dz;	// no: world translate z
+		}
+	}
+
+	// Antes da atualizacao: se a nossa soma do frame anterior ainda la esta, desfaz-a (senao acumularia);
+	// se o jogo ja reescreveu os valores, nao toca. Conta quantas vezes aconteceu cada caso.
+	void PrePass(unsigned flat)
+	{
+		if(g_lastDz == 0.0f) return;
+
+		unsigned entries, count;
+		if(FlatArray(flat, &entries, &count) && g_comIndex < count && ReadableMem(entries + g_comIndex * 0x78, 0x78))
+		{
+			const float z = *(const float *)(entries + g_comIndex * 0x78 + 0x60);
+			if(fabsf(z - g_lastZE) < 0.01f) { AddDz(flat, -g_lastDz); InterlockedIncrement(&g_persisted); }
+			else							  { InterlockedIncrement(&g_rewritten); }
+		}
+		g_lastDz = 0.0f;
+	}
+
+	// Depois da atualizacao: durante a janela da experiencia, ergue o corpo todo (sobe e desce uma vez em 6 s).
+	void PostPass(unsigned flat)
 	{
 		const DWORD now = GetTickCount();
-		if(!g_expStart || now < g_expStart || now > g_expEnd || g_comIndex == 0xFFFFFFFF) return false;
+		if(!g_expStart || now < g_expStart || now > g_expEnd) return;
 
-		const unsigned f = (unsigned)flat;
-		if(!ReadableMem(f + 0xB8, 12)) { InterlockedIncrement(&g_expSkipped); return false; }
-
-		const unsigned count   = *(const unsigned *)(f + 0xB8);
-		const unsigned entries = *(const unsigned *)(f + 0xC0);
-		if(!entries || g_comIndex >= count) { InterlockedIncrement(&g_expSkipped); return false; }
-
-		const unsigned entry = entries + g_comIndex * 0x78;
-		if(!ReadableMem(entry, 0x78)) { InterlockedIncrement(&g_expSkipped); return false; }
-
-		if(InterlockedCompareExchange(&g_inExp, 1, 0) != 0) return false;	// outra thread ja esta dentro
-
-		float * translate = (float *)(entry + 0x24);						// NiTransform local: translacao em +0x24
-		memcpy(saved, translate, 3 * sizeof(float));
-
-		float t = (float)(now - g_expStart) / 6000.0f;						// 0..1 ao longo dos 6 s
+		float t = (float)(now - g_expStart) / 6000.0f;
 		if(t > 1.0f) t = 1.0f;
-		translate[2] = saved[2] + kLiftUnits * sinf(t * 3.14159265f);		// z = para cima
+		const float dz = kLiftUnits * sinf(t * 3.14159265f);
+		if(dz < 0.05f) return;
 
-		*entryOut = entry;
-		InterlockedIncrement(&g_expApplied);
-		return true;
-	}
+		unsigned entries, count;
+		if(!FlatArray(flat, &entries, &count) || g_comIndex >= count) return;
 
-	void EndExperiment(unsigned entry, const float * saved)
-	{
-		if(ReadableMem(entry + 0x24, 3 * sizeof(float))) memcpy((void *)(entry + 0x24), saved, 3 * sizeof(float));
-		InterlockedExchange(&g_inExp, 0);
-	}
-
-	// Depois da atualizacao: mede quanto subiu a posicao MUNDIAL do osso (entrada e no).
-	void Measure(unsigned flat, bool applied)
-	{
-		if(g_comIndex == 0xFFFFFFFF || !ReadableMem(flat + 0xB8, 12)) return;
-		const unsigned count = *(const unsigned *)(flat + 0xB8), entries = *(const unsigned *)(flat + 0xC0);
-		if(!entries || g_comIndex >= count) return;
-
-		const unsigned e = entries + g_comIndex * 0x78;
-		if(!ReadableMem(e, 0x78)) return;
-
-		const float zEntry = *(const float *)(e + 0x60);					// translacao mundial z da entrada
-		const unsigned node = *(const unsigned *)(e + 0x70);
-		const float zNode = (node && ReadableMem(node + 0x80, 4)) ? *(const float *)(node + 0x80) : 0.0f;
-
-		if(!applied)
-		{
-			g_snapZEntry = zEntry; g_snapZNode = zNode; g_snapValid = 1;
-			return;
-		}
-		if(!g_snapValid) return;
-
-		const float de = zEntry - g_snapZEntry, dn = (node ? zNode - g_snapZNode : 0.0f);
-		if(de > g_maxDzEntry) g_maxDzEntry = de;
-		if(dn > g_maxDzNode)  g_maxDzNode = dn;
-		InterlockedIncrement(&g_measured);
+		AddDz(flat, dz);
+		g_lastDz = dz;
+		g_lastZE = *(const float *)(entries + g_comIndex * 0x78 + 0x60);
+		InterlockedIncrement(&g_levFrames);
 	}
 
 	typedef void (__thiscall * Fn2)(void *, void *, unsigned);	// (this, dados, flags)  ret 8
@@ -161,15 +161,11 @@ namespace
 		static void __fastcall call(void * self, void *, void * data, unsigned flags)
 		{
 			Count(kDownward, self);
+			const bool player = ((unsigned)self == g_playerFlat && g_playerFlat);
 
-			float saved[9];
-			unsigned entry = 0;
-			const bool applied = ((unsigned)self == g_playerFlat && g_playerFlat) ? BeginExperiment(self, saved, &entry) : false;
-
+			if(player) PrePass((unsigned)self);
 			original(self, data, flags);
-
-			if((unsigned)self == g_playerFlat && g_playerFlat) Measure((unsigned)self, applied);
-			if(applied) EndExperiment(entry, saved);
+			if(player) PostPass((unsigned)self);
 		}
 	};
 	Fn2 Pass2<kFlatTree, kDownward>::original = NULL;
@@ -325,13 +321,13 @@ namespace
 		for(int cycle = 1; cycle <= 4; ++cycle)
 		{
 			const DWORD now = GetTickCount();
-			g_expApplied = 0; g_expSkipped = 0; g_maxDzEntry = 0; g_maxDzNode = 0; g_measured = 0;
+			g_levFrames = 0; g_persisted = 0; g_rewritten = 0;
 			g_expStart = now; g_expEnd = now + 6000;
-			_MESSAGE("experiment: cycle %d ON  - the WHOLE BODY should rise about half a metre and come back down over 6 s (levitation)", cycle);
+			_MESSAGE("experiment: cycle %d ON  - the WHOLE BODY should rise about 1 metre and come back down over 6 s (levitation)", cycle);
 
 			Sleep(6500);
-			_MESSAGE("experiment: cycle %d OFF - writes applied %ld, skipped %ld, measured %ld; max rise of the bone's WORLD height: entry %.1f units, node %.1f units (wrote up to %.0f)",
-					 cycle, g_expApplied, g_expSkipped, g_measured, (double)g_maxDzEntry, (double)g_maxDzNode, (double)kLiftUnits);
+			_MESSAGE("experiment: cycle %d OFF - frames written %ld; next frame still had our value (we undid it) %ld times, game had rewritten it %ld times",
+					 cycle, g_levFrames, g_persisted, g_rewritten);
 
 			Sleep(8000);
 		}
@@ -347,7 +343,7 @@ void SceneHooksStartExperiment(unsigned comIndex)
 
 	if(comIndex == 0xFFFFFFFF) { _MESSAGE("experiment: 'NPC COM [COM ]' not found - not started"); return; }
 
-	_MESSAGE("experiment: automatic, centre-of-body bone = flat entry %u. In ~8 s the whole body should float up ~0.85 m and back, 4 times (6 s up-and-down, 8 s rest). Stand still in third person.", comIndex);
+	_MESSAGE("experiment: automatic, centre-of-body bone = flat entry %u. In ~8 s the whole body should float up ~1 m and back, 4 times (6 s up-and-down, 8 s rest). Stand still in third person.", comIndex);
 	if(!started)
 	{
 		started = true;
