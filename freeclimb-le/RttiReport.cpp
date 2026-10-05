@@ -276,6 +276,8 @@ namespace
 
 	// ======================= passo 5: sonda do esqueleto do jogador =======================
 
+	bool g_probeDone = false;
+
 	bool Readable(unsigned address, unsigned size)
 	{
 		if(address < 0x10000 || address + size < address) return false;
@@ -463,7 +465,8 @@ namespace
 		const unsigned third = getRoot((void *)player, 0);
 		const unsigned first = getRoot((void *)player, 1);
 		_MESSAGE("scene: player=%08X  third-person root=%08X  first-person root=%08X", player, third, first);
-		if(!third) { _MESSAGE("scene: the player has no 3D yet"); return; }
+		if(!third) { _MESSAGE("scene: the player has no 3D yet (still loading?) - will try again"); return; }
+		g_probeDone = true;
 
 		const vt::Result niNode = vt::Find(regions, codeLo, codeHi, ".?AVNiNode@@");
 		unsigned niNodeVtable = 0;
@@ -666,9 +669,17 @@ namespace
 
 	DWORD WINAPI RetryThread(LPVOID)
 	{
-		Sleep(12000);	// da tempo ao jogo para carregar o personagem
-		_MESSAGE("scene: probing the player's skeleton (read-only)...");
-		SafeProbe();
+		// O jogo manda a mensagem "save carregado" ANTES de o ecra de loading acabar (a lista de mods
+		// pesada demora). Por isso espera, de 2 em 2 s (ate 4 min), que o personagem tenha corpo 3D.
+		g_probeDone = false;
+		Sleep(12000);
+		for(int attempt = 1; attempt <= 120 && !g_probeDone; ++attempt)
+		{
+			_MESSAGE("scene: probing the player's skeleton (read-only), attempt %d...", attempt);
+			SafeProbe();
+			if(!g_probeDone) Sleep(2000);
+		}
+		if(!g_probeDone) _MESSAGE("scene: gave up - the player never got a 3D body");
 		return 0;
 	}
 }

@@ -282,9 +282,45 @@ void SceneHooksStartReport()
 
 namespace
 {
+	// Posicao mundial do no raiz do jogador (translacao em +0x78).
+	bool PlayerPos(float * p)
+	{
+		const unsigned root = g_playerRoot;
+		if(!root || !ReadableMem(root + 0x78, 12)) return false;
+		memcpy(p, (const void *)(root + 0x78), 12);
+		return true;
+	}
+
 	DWORD WINAPI CycleThread(LPVOID)
 	{
-		Sleep(8000);
+		// So comeca quando o jogador ANDA uns passos e depois PARA: assim nunca corre durante um
+		// ecra de loading (la a posicao nao muda). Saltos grandes de posicao (teletransporte do
+		// loading) sao ignorados: so conta andar de forma gradual.
+		_MESSAGE("experiment: waiting - WALK a few steps (about 1 m or more) and then STAND STILL for 3 s. It never starts during a loading screen.");
+
+		const DWORD t0 = GetTickCount();
+		float last[3] = { 0, 0, 0 };
+		bool haveLast = false, announced = false;
+		float walked = 0.0f;
+		DWORD stillSince = GetTickCount();
+
+		for(;;)
+		{
+			Sleep(100);
+			if(GetTickCount() - t0 > 600000) { _MESSAGE("experiment: no walking detected for 10 min - giving up"); return 0; }
+
+			float p[3];
+			if(!PlayerPos(p)) continue;
+			if(!haveLast) { memcpy(last, p, 12); haveLast = true; stillSince = GetTickCount(); continue; }
+
+			const float step = sqrtf((p[0] - last[0]) * (p[0] - last[0]) + (p[1] - last[1]) * (p[1] - last[1]));
+			if(step > 0.5f && step < 60.0f) walked += step;			// andar: poucos centimetros por 0,1 s
+			if(step > 1.0f) stillSince = GetTickCount();				// ainda a mexer (ou a saltar de sitio)
+			memcpy(last, p, 12);
+
+			if(walked > 80.0f && !announced) { announced = true; _MESSAGE("experiment: walking detected - gameplay is live. Now stand still."); }
+			if(announced && GetTickCount() - stillSince > 3000) break;
+		}
 
 		for(int cycle = 1; cycle <= 4; ++cycle)
 		{
