@@ -173,30 +173,53 @@ namespace
 		unsigned		lastSlot;
 	};
 
-	// Passo 14: as classes que ligam os ossos ao desenho (pele). Todas as posicoes de cada tabela.
+	// Passo 15: funcoes auxiliares das passagens de atualizacao (por endereco: "#ENDERECO") e os
+	// "shaders" do renderizador (onde o jogo monta as matrizes dos ossos para desenhar o corpo).
 	const DumpTarget kDump[] =
 	{
-		{ ".?AVNiSkinInstance@@",			"NiSkinInstance",			700, 0, 0xFFFF },
-		{ ".?AVBSDismemberSkinInstance@@",	"BSDismemberSkinInstance",	700, 0, 0xFFFF },
-		{ ".?AVNiSkinData@@",				"NiSkinData",				400, 0, 0xFFFF },
-		{ ".?AVNiSkinPartition@@",			"NiSkinPartition",			400, 0, 0xFFFF },
-		{ ".?AVNiGeometry@@",				"NiGeometry",				500, 0, 0xFFFF },
-		{ ".?AVNiTriBasedGeom@@",			"NiTriBasedGeom",			500, 0, 0xFFFF },
-		{ ".?AVNiTriShape@@",				"NiTriShape",				500, 0, 0xFFFF },
-		{ ".?AVBSDismemberSkinInstance@NiSkinInstance@@", "dummy",		16,  0, 0 },
+		{ "#00ABDEC0",						"FlatTree::Refresh(0ABDEC0)",		1500, 0, 0 },
+		{ "#00ABDFC0",						"FlatTree::GetOrCreateNode(0ABDFC0)", 900, 0, 0 },
+		{ "#00ABE290",						"FlatTree::Func(0ABE290)",			700,  0, 0 },
+		{ "#00AB5370",						"NiAVObject::WorldData(0AB5370)",	900,  0, 0 },
+		{ "#00AAF6A0",						"NiNode::Func(0AAF6A0)",			500,  0, 0 },
+		{ "#00AAF430",						"NiNode::Func(0AAF430)",			500,  0, 0 },
+		{ "#004202E0",						"Func(04202E0)",					300,  0, 0 },
+		{ ".?AVBSLightingShader@@",			"BSLightingShader",					700,  0, 0xFFFF },
+		{ ".?AVBSShader@@",					"BSShader",							700,  0, 0xFFFF },
+		{ ".?AVBSEffectShader@@",			"BSEffectShader",					500,  0, 0xFFFF },
 	};
 
 	void DumpVtablesToFile(const std::vector<vt::Region> & regions, unsigned codeLo, unsigned codeHi)
 	{
 		std::string out;
 		out.reserve(300 * 1024);
-		out += "# FreeClimb LE - vtable dump (passo 14: pele)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
+		out += "# FreeClimb LE - dump (passo 15: funcoes auxiliares e shaders)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
 		out += "# EXT = o slot aponta para fora do TESV.exe (outro plugin interceptou-o)\n";
 
 		unsigned classes = 0, functions = 0, external = 0;
 
 		for(size_t k = 0; k < sizeof(kDump) / sizeof(kDump[0]); ++k)
 		{
+			if(kDump[k].mangled[0] == '#')
+			{
+				// uma funcao avulsa, dada pelo endereco ("#00ABDEC0")
+				const unsigned fnAddr = (unsigned)strtoul(kDump[k].mangled + 1, NULL, 16);
+				char fhead[200];
+				_snprintf_s(fhead, sizeof(fhead), _TRUNCATE, "== %s vtable=00000000 slots=1 bytes=%u\n", kDump[k].label, kDump[k].bytes);
+				out += fhead;
+				++classes;
+				if(fnAddr >= codeLo && fnAddr + kDump[k].bytes <= codeHi)
+				{
+					char fline[64];
+					_snprintf_s(fline, sizeof(fline), _TRUNCATE, "0 %08X ", fnAddr);
+					out += fline;
+					AppendHex(out, (const unsigned char *)fnAddr, kDump[k].bytes);
+					out += "\n";
+					++functions;
+				}
+				continue;
+			}
+
 			vt::Result r;
 			vt::Found byAddress;
 			const vt::Found * primary = NULL;
