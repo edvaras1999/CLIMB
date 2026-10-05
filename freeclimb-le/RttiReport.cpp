@@ -173,23 +173,24 @@ namespace
 		unsigned		lastSlot;
 	};
 
-	// Passo 7: so as funcoes que interessam, e muito mais bytes de cada (a funcao inteira).
+	// Passo 14: as classes que ligam os ossos ao desenho (pele). Todas as posicoes de cada tabela.
 	const DumpTarget kDump[] =
 	{
-		{ ".?AVNiAVObject@@",				"NiAVObject",				1400, 0x27, 0x32 },
-		{ ".?AVNiNode@@",					"NiNode",					1400, 0x27, 0x32 },
-		{ "@0114D988",						"BSFadeNode (no RTTI)",		1400, 0x27, 0x32 },
-		{ ".?AVBSFlattenedBoneTree@@",		"BSFlattenedBoneTree",		1400, 0x27, 0x32 },
-		{ ".?AVBSWin32KeyboardDevice@@",	"BSWin32KeyboardDevice",	400,  0,    0xFFFF },
-		{ ".?AVThirdPersonState@@",			"ThirdPersonState",			700,  0,    0xFFFF },
-		{ ".?AVFirstPersonState@@",			"FirstPersonState",			700,  0,    0xFFFF },
+		{ ".?AVNiSkinInstance@@",			"NiSkinInstance",			700, 0, 0xFFFF },
+		{ ".?AVBSDismemberSkinInstance@@",	"BSDismemberSkinInstance",	700, 0, 0xFFFF },
+		{ ".?AVNiSkinData@@",				"NiSkinData",				400, 0, 0xFFFF },
+		{ ".?AVNiSkinPartition@@",			"NiSkinPartition",			400, 0, 0xFFFF },
+		{ ".?AVNiGeometry@@",				"NiGeometry",				500, 0, 0xFFFF },
+		{ ".?AVNiTriBasedGeom@@",			"NiTriBasedGeom",			500, 0, 0xFFFF },
+		{ ".?AVNiTriShape@@",				"NiTriShape",				500, 0, 0xFFFF },
+		{ ".?AVBSDismemberSkinInstance@NiSkinInstance@@", "dummy",		16,  0, 0 },
 	};
 
 	void DumpVtablesToFile(const std::vector<vt::Region> & regions, unsigned codeLo, unsigned codeHi)
 	{
 		std::string out;
 		out.reserve(300 * 1024);
-		out += "# FreeClimb LE - vtable dump (passo 7)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
+		out += "# FreeClimb LE - vtable dump (passo 14: pele)\n# formato: slot  endereco-da-funcao  bytes-iniciais-em-hex\n";
 		out += "# EXT = o slot aponta para fora do TESV.exe (outro plugin interceptou-o)\n";
 
 		unsigned classes = 0, functions = 0, external = 0;
@@ -686,6 +687,9 @@ namespace
 
 void ReportScene()
 {
+	const bool kSceneProbeEnabled = false;		// passo 14: sem sonda nem experiencias no jogo
+	if(!kSceneProbeEnabled) return;
+
 	static int calls = 0;
 	if(++calls > 2) return;		// so as duas primeiras cargas de save
 
