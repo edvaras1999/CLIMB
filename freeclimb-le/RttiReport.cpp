@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/IDebugLog.h"
+#include "PackLoader.h"
 #include "RttiReport.h"
 #include "SceneHooks.h"
 #include "VtableScan.h"
@@ -565,7 +566,8 @@ namespace
 			// Todas as entradas, uma linha cada: indice, pai, flags, no, nome. Para parar no fim real
 			// do array: uma entrada sem rotacao valida e sem nome legivel.
 			const unsigned entries = Rd32(ctx.flattened + 0xC0);
-			unsigned shown = 0, lastGood = 0, comIndex = 0xFFFFFFFF;
+			unsigned shown = 0, lastGood = 0;
+			std::vector<std::string> entryNames;
 			_MESSAGE("scene: --- ALL flat entries (index parent flags node name) ---");
 			for(unsigned i = 0; i < 1024 && entries; ++i)
 			{
@@ -577,12 +579,29 @@ namespace
 				const float rotErr = RotationError(e) + RotationError(e + 0x34);
 				if(entryName[0] == 0 && rotErr > 0.01f) { _MESSAGE("scene: E[%u] looks past the end (no name, rotErr=%.3f) - stop", i, rotErr); break; }
 
-				if(_stricmp(entryName, "NPC COM [COM ]") == 0) comIndex = i;
+				entryNames.push_back(entryName);
 				_MESSAGE("scene: E %u %d %08X %08X '%s'", i, (int)(short)Rd16(e + 0x68), Rd32(e + 0x6C), Rd32(e + 0x70), entryName);
 				lastGood = i; ++shown;
 			}
 			_MESSAGE("scene: --- %u entries printed, last index %u ---", shown, lastGood);
-			SceneHooksStartExperiment(comIndex);
+
+			// liga cada osso canonico do FreeClimb a uma entrada da tabela, pelo nome (sem distinguir maiusculas).
+			// Ficam de fora os ossos que o motor controla (raiz, folhas auxiliares, equipamento, camaras).
+			int map[99];
+			const int engineOwned[] = { 0, 1, 2, 3, 42, 43, 60, 61, 62, 63, 64, 65, 66, 97, 98 };
+			for(int bone = 0; bone < 99; ++bone)
+			{
+				map[bone] = -1;
+				bool skip = false;
+				for(size_t k = 0; k < sizeof(engineOwned) / sizeof(engineOwned[0]); ++k) if(engineOwned[k] == bone) skip = true;
+				if(skip) continue;
+
+				const char * boneName = FC_BoneName(bone);
+				for(size_t i = 0; i < entryNames.size(); ++i)
+					if(_stricmp(boneName, entryNames[i].c_str()) == 0) { map[bone] = (int)i; break; }
+			}
+			SceneHooksBindBones(map);
+			SceneHooksStartPoseTest();
 		}
 
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));

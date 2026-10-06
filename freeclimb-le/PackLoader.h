@@ -14,3 +14,11 @@ struct PackSummary
 
 // Carrega o pacote de animacoes (pack.json + configs + .hkx). Nunca lanca excecoes.
 bool FC_LoadAnimationPack(const char * manifestPath, PackSummary * out);
+
+// ---- poses de teste da biblioteca carregada (so tipos simples) ----
+// Cada pose tem 99 ossos x 10 floats: translacao(3), quaternio x y z w (4), escala(3).
+int			FC_BoneCount();				// 99 se a biblioteca esta carregada, senao 0
+const char *	FC_BoneName(int bone);		// nome do osso canonico (ex. "NPC L UpperArm [LUar]")
+int			FC_PoseCount();
+const char *	FC_PoseName(int pose);
+bool		FC_GetPose(int pose, float * out990);

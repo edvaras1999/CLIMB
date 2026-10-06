@@ -20,7 +20,7 @@
 #include <shlobj.h>
 
 #define PLUGIN_NAME				"FreeClimbLE"
-#define PLUGIN_VERSION_STRING	"0.16.0 (passo 16: levitacao escrevendo as posicoes mundiais)"
+#define PLUGIN_VERSION_STRING	"0.17.0 (passo 17: poses reais do FreeClimb no corpo)"
 #define PLUGIN_LOG_FILE			"\\My Games\\Skyrim\\SKSE\\FreeClimbLE.log"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;

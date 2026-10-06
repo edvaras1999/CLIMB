@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include "common/IDebugLog.h"
+#include "PackLoader.h"
 #include "SceneHooks.h"
 
 namespace
@@ -50,16 +51,19 @@ namespace
 		else if(s == g_playerRoot && s)	{ InterlockedIncrement(&g_rootCalls[kind]); NoteThread(); }
 	}
 
-	// ---- experiencia: LEVITACAO escrevendo as posicoes MUNDIAIS, depois da atualizacao ----
-	// Descoberto no passo 15 (0ABDEC0): no fim da passagem o jogo COPIA a transformacao mundial de cada
-	// no para a entrada da tabela achatada. Por isso escrever na rotacao "local" da entrada nao serve
-	// (e so um espelho). Aqui, depois da passagem, somamos uma altura a TODAS as posicoes mundiais
-	// (entrada +0x60 e no +0x80), no meio da pose: o corpo todo sobe, sem contas de hierarquia.
-	volatile DWORD		g_expStart = 0, g_expEnd = 0;
-	volatile LONG		g_levFrames = 0, g_persisted = 0, g_rewritten = 0;
-	float				g_lastDz = 0, g_lastZE = 0;
-	volatile unsigned	g_comIndex = 0xFFFFFFFF;
-	const float			kLiftUnits = 80.0f;			// ~1,1 m (1 unidade do Skyrim ~ 1,4 cm)
+	// ---- Passo 17: aplicar uma POSE REAL do FreeClimb ao esqueleto do jogador ----
+	// O jogo, no fim da passagem (0ABDEC0), copia a transformacao mundial de cada no para a tabela achatada,
+	// e o desenho le essas posicoes. Por isso: DEPOIS da passagem, recalculamos as posicoes mundiais da
+	// hierarquia inteira (645 entradas, pais antes dos filhos) e escrevemo-las na entrada e no no.
+	// Para os ossos canonicos a rotacao local vem da pose; o resto mantem a transformacao local atual.
+	volatile DWORD		g_poseStart = 0, g_poseEnd = 0;
+	volatile LONG		g_poseReady = 0, g_poseFrames = 0;
+	float				g_pose[99 * 10];
+	int					g_boneEntry[99];
+	volatile LONG		g_fkCheckRequested = 0, g_fkCheckDone = 0;
+	float				g_fkMaxT = 0, g_fkMaxRotDeg = 0;
+	unsigned			g_fkEntries = 0, g_fkMismatch = 0;
+	volatile LONG		g_inPose = 0;
 
 	bool ReadableMem(unsigned address, unsigned size)
 	{
@@ -86,58 +90,147 @@ namespace
 		return *entries && *count > 0 && *count <= 1024;
 	}
 
-	// Soma 'dz' a altura mundial de todas as entradas e de todos os nos que elas apontam.
-	void AddDz(unsigned flat, float dz)
+	struct Tr { float r[9]; float t[3]; float s; };		// NiTransform: rotacao 3x3 (linhas), translacao, escala
+
+	// como o jogo multiplica transformacoes: R = Rp*Rl ; T = Tp + sp*(Rp*Tl) ; S = sp*sl
+	void Mul(const Tr & p, const Tr & l, Tr * out)
 	{
-		unsigned entries, count;
-		if(!FlatArray(flat, &entries, &count)) return;
+		for(int i = 0; i < 3; ++i)
+			for(int j = 0; j < 3; ++j)
+				out->r[i * 3 + j] = p.r[i * 3 + 0] * l.r[0 * 3 + j] + p.r[i * 3 + 1] * l.r[1 * 3 + j] + p.r[i * 3 + 2] * l.r[2 * 3 + j];
+		for(int i = 0; i < 3; ++i)
+			out->t[i] = p.t[i] + p.s * (p.r[i * 3 + 0] * l.t[0] + p.r[i * 3 + 1] * l.t[1] + p.r[i * 3 + 2] * l.t[2]);
+		out->s = p.s * l.s;
+	}
+
+	// quaternio (x y z w) -> matriz; as COLUNAS sao os eixos rodados (a mesma convencao do FreeClimb/NiMatrix3)
+	void FromQuat(const float * q, float * r)
+	{
+		const float x = q[0], y = q[1], z = q[2], w = q[3];
+		r[0] = 1 - 2 * (y * y + z * z);	r[1] = 2 * (x * y - z * w);		r[2] = 2 * (x * z + y * w);
+		r[3] = 2 * (x * y + z * w);		r[4] = 1 - 2 * (x * x + z * z);	r[5] = 2 * (y * z - x * w);
+		r[6] = 2 * (x * z - y * w);		r[7] = 2 * (y * z + x * w);		r[8] = 1 - 2 * (x * x + y * y);
+	}
+
+	float RotAngleDeg(const float * a, const float * b)
+	{
+		float tr = 0;
+		for(int i = 0; i < 9; ++i) tr += a[i] * b[i];
+		float c = (tr - 1.0f) * 0.5f;
+		if(c > 1.0f) c = 1.0f;
+		if(c < -1.0f) c = -1.0f;
+		return acosf(c) * 57.29578f;
+	}
+
+	// A transformacao local ATUAL de uma entrada: do no, se tem no (o no e o que o jogo anima); senao da entrada.
+	void LiveLocal(unsigned e, Tr * out)
+	{
+		const unsigned node = *(const unsigned *)(e + 0x70);
+		if(node && ReadableMem(node + 0x20, 0x34))
+		{
+			memcpy(out->r, (const void *)(node + 0x20), 36);
+			memcpy(out->t, (const void *)(node + 0x44), 12);
+			out->s = *(const float *)(node + 0x50);
+		}
+		else
+		{
+			memcpy(out->r, (const void *)(e + 0x00), 36);
+			memcpy(out->t, (const void *)(e + 0x24), 12);
+			out->s = *(const float *)(e + 0x30);
+		}
+	}
+
+	void ReadWorld(unsigned base, unsigned rotOff, unsigned tOff, unsigned sOff, Tr * out)
+	{
+		memcpy(out->r, (const void *)(base + rotOff), 36);
+		memcpy(out->t, (const void *)(base + tOff), 12);
+		out->s = *(const float *)(base + sOff);
+	}
+
+	void WriteWorld(unsigned base, unsigned rotOff, unsigned tOff, unsigned sOff, const Tr & w)
+	{
+		memcpy((void *)(base + rotOff), w.r, 36);
+		memcpy((void *)(base + tOff), w.t, 12);
+		*(float *)(base + sOff) = w.s;
+	}
+
+	Tr g_world[1024];
+
+	// Calcula as posicoes mundiais de todas as entradas. Se 'usePose', os ossos canonicos recebem a rotacao da pose.
+	bool ComputeWorlds(unsigned flat, bool usePose, unsigned entries, unsigned count)
+	{
+		// de que osso canonico e cada entrada (-1 = nenhum)
+		int boneOfEntry[1024];
+		for(unsigned i = 0; i < count; ++i) boneOfEntry[i] = -1;
+		if(usePose)
+			for(int b = 0; b < 99; ++b)
+				if(g_boneEntry[b] >= 0 && (unsigned)g_boneEntry[b] < count) boneOfEntry[g_boneEntry[b]] = b;
+
+		Tr root;
+		ReadWorld(flat, 0x54, 0x78, 0x84, &root);		// a propria tabela e o "pai" das entradas de topo
 
 		for(unsigned i = 0; i < count; ++i)
 		{
 			const unsigned e = entries + i * 0x78;
-			if(!ReadableMem(e, 0x78)) return;
+			if(!ReadableMem(e, 0x78)) return false;
 
-			*(float *)(e + 0x60) += dz;										// entrada: world translate z
+			Tr local;
+			LiveLocal(e, &local);
+			if(boneOfEntry[i] >= 0) FromQuat(g_pose + boneOfEntry[i] * 10 + 3, local.r);	// rotacao da pose; t e s ficam os do esqueleto real
 
-			const unsigned node = *(const unsigned *)(e + 0x70);
-			if(node && ReadableMem(node + 0x80, 4)) *(float *)(node + 0x80) += dz;	// no: world translate z
+			const int parent = (int)(short)(*(const unsigned short *)(e + 0x68));
+			if(parent >= (int)i) return false;											// ordem inesperada: nao arriscar
+			Mul(parent >= 0 ? g_world[parent] : root, local, &g_world[i]);
 		}
+		return true;
 	}
 
-	// Antes da atualizacao: se a nossa soma do frame anterior ainda la esta, desfaz-a (senao acumularia);
-	// se o jogo ja reescreveu os valores, nao toca. Conta quantas vezes aconteceu cada caso.
-	void PrePass(unsigned flat)
-	{
-		if(g_lastDz == 0.0f) return;
-
-		unsigned entries, count;
-		if(FlatArray(flat, &entries, &count) && g_comIndex < count && ReadableMem(entries + g_comIndex * 0x78, 0x78))
-		{
-			const float z = *(const float *)(entries + g_comIndex * 0x78 + 0x60);
-			if(fabsf(z - g_lastZE) < 0.01f) { AddDz(flat, -g_lastDz); InterlockedIncrement(&g_persisted); }
-			else							  { InterlockedIncrement(&g_rewritten); }
-		}
-		g_lastDz = 0.0f;
-	}
-
-	// Depois da atualizacao: durante a janela da experiencia, ergue o corpo todo (sobe e desce uma vez em 6 s).
+	// Depois da atualizacao do esqueleto do jogador.
 	void PostPass(unsigned flat)
 	{
 		const DWORD now = GetTickCount();
-		if(!g_expStart || now < g_expStart || now > g_expEnd) return;
-
-		float t = (float)(now - g_expStart) / 6000.0f;
-		if(t > 1.0f) t = 1.0f;
-		const float dz = kLiftUnits * sinf(t * 3.14159265f);
-		if(dz < 0.05f) return;
+		const bool poseOn = g_poseReady && g_poseStart && now >= g_poseStart && now <= g_poseEnd;
+		if(!poseOn && !g_fkCheckRequested) return;
 
 		unsigned entries, count;
-		if(!FlatArray(flat, &entries, &count) || g_comIndex >= count) return;
+		if(!FlatArray(flat, &entries, &count)) return;
+		if(InterlockedCompareExchange(&g_inPose, 1, 0) != 0) return;
 
-		AddDz(flat, dz);
-		g_lastDz = dz;
-		g_lastZE = *(const float *)(entries + g_comIndex * 0x78 + 0x60);
-		InterlockedIncrement(&g_levFrames);
+		if(poseOn)
+		{
+			if(ComputeWorlds(flat, true, entries, count))
+			{
+				for(unsigned i = 0; i < count; ++i)
+				{
+					const unsigned e = entries + i * 0x78;
+					WriteWorld(e, 0x34, 0x58, 0x64, g_world[i]);						// entrada: mundo em +0x34
+					const unsigned node = *(const unsigned *)(e + 0x70);
+					if(node && ReadableMem(node + 0x54, 0x34)) WriteWorld(node, 0x54, 0x78, 0x84, g_world[i]);	// no: mundo em +0x54
+				}
+				InterlockedIncrement(&g_poseFrames);
+			}
+		}
+		else if(g_fkCheckRequested && ComputeWorlds(flat, false, entries, count))
+		{
+			// auto-verificacao: o que calculamos a partir das locais bate com o que o jogo calculou?
+			float maxT = 0, maxRot = 0; unsigned bad = 0;
+			for(unsigned i = 0; i < count; ++i)
+			{
+				const unsigned e = entries + i * 0x78;
+				Tr live; ReadWorld(e, 0x34, 0x58, 0x64, &live);
+				float dt = 0;
+				for(int k = 0; k < 3; ++k) { const float d = fabsf(live.t[k] - g_world[i].t[k]); if(d > dt) dt = d; }
+				const float dr = RotAngleDeg(live.r, g_world[i].r);
+				if(dt > maxT) maxT = dt;
+				if(dr > maxRot) maxRot = dr;
+				if(dt > 0.5f || dr > 1.0f) ++bad;
+			}
+			g_fkMaxT = maxT; g_fkMaxRotDeg = maxRot; g_fkEntries = count; g_fkMismatch = bad;
+			InterlockedExchange(&g_fkCheckRequested, 0);
+			InterlockedExchange(&g_fkCheckDone, 1);
+		}
+
+		InterlockedExchange(&g_inPose, 0);
 	}
 
 	typedef void (__thiscall * Fn2)(void *, void *, unsigned);	// (this, dados, flags)  ret 8
@@ -163,7 +256,6 @@ namespace
 			Count(kDownward, self);
 			const bool player = ((unsigned)self == g_playerFlat && g_playerFlat);
 
-			if(player) PrePass((unsigned)self);
 			original(self, data, flags);
 			if(player) PostPass((unsigned)self);
 		}
@@ -289,10 +381,7 @@ namespace
 
 	DWORD WINAPI CycleThread(LPVOID)
 	{
-		// So comeca quando o jogador ANDA uns passos e depois PARA: assim nunca corre durante um
-		// ecra de loading (la a posicao nao muda). Saltos grandes de posicao (teletransporte do
-		// loading) sao ignorados: so conta andar de forma gradual.
-		_MESSAGE("experiment: waiting - WALK a few steps (about 1 m or more) and then STAND STILL for 3 s. It never starts during a loading screen.");
+		_MESSAGE("pose test: waiting - WALK a few steps (about 1 m or more) and then STAND STILL for 3 s. It never starts during a loading screen.");
 
 		const DWORD t0 = GetTickCount();
 		float last[3] = { 0, 0, 0 };
@@ -303,51 +392,72 @@ namespace
 		for(;;)
 		{
 			Sleep(100);
-			if(GetTickCount() - t0 > 600000) { _MESSAGE("experiment: no walking detected for 10 min - giving up"); return 0; }
+			if(GetTickCount() - t0 > 600000) { _MESSAGE("pose test: no walking detected for 10 min - giving up"); return 0; }
 
 			float p[3];
 			if(!PlayerPos(p)) continue;
 			if(!haveLast) { memcpy(last, p, 12); haveLast = true; stillSince = GetTickCount(); continue; }
 
 			const float step = sqrtf((p[0] - last[0]) * (p[0] - last[0]) + (p[1] - last[1]) * (p[1] - last[1]));
-			if(step > 0.5f && step < 60.0f) walked += step;			// andar: poucos centimetros por 0,1 s
-			if(step > 1.0f) stillSince = GetTickCount();				// ainda a mexer (ou a saltar de sitio)
+			if(step > 0.5f && step < 60.0f) walked += step;
+			if(step > 1.0f) stillSince = GetTickCount();
 			memcpy(last, p, 12);
 
-			if(walked > 80.0f && !announced) { announced = true; _MESSAGE("experiment: walking detected - gameplay is live. Now stand still."); }
+			if(walked > 80.0f && !announced) { announced = true; _MESSAGE("pose test: walking detected - gameplay is live. Now stand still."); }
 			if(announced && GetTickCount() - stillSince > 3000) break;
 		}
 
-		for(int cycle = 1; cycle <= 4; ++cycle)
+		// 1) auto-verificacao da matematica (nao altera nada)
+		g_fkCheckDone = 0;
+		InterlockedExchange(&g_fkCheckRequested, 1);
+		for(int w = 0; w < 100 && !g_fkCheckDone; ++w) Sleep(100);
+		if(g_fkCheckDone)
+			_MESSAGE("pose test: FK self-check on %u entries: max position error %.3f units, max rotation error %.2f deg, %u entries off by more than 0.5 units / 1 deg",
+					 g_fkEntries, (double)g_fkMaxT, (double)g_fkMaxRotDeg, g_fkMismatch);
+		else
+			_MESSAGE("pose test: FK self-check did not run (no pass seen)");
+
+		// 2) as poses, uma de cada vez: 6 s a aplicar, 8 s de descanso
+		const int nPoses = FC_PoseCount();
+		_MESSAGE("pose test: %d poses will be applied one at a time (6 s each, 8 s rest). Watch the character from third person.", nPoses);
+		for(int k = 0; k < nPoses; ++k)
 		{
+			g_poseReady = 0;
+			if(!FC_GetPose(k, g_pose)) { _MESSAGE("pose test: pose %d '%s' could not be read - skipped", k, FC_PoseName(k)); continue; }
+			g_poseReady = 1;
+
 			const DWORD now = GetTickCount();
-			g_levFrames = 0; g_persisted = 0; g_rewritten = 0;
-			g_expStart = now; g_expEnd = now + 6000;
-			_MESSAGE("experiment: cycle %d ON  - the WHOLE BODY should rise about 1 metre and come back down over 6 s (levitation)", cycle);
-
+			g_poseFrames = 0; g_poseStart = now; g_poseEnd = now + 6000;
+			_MESSAGE("pose test: pose %d ON  - '%s'", k, FC_PoseName(k));
 			Sleep(6500);
-			_MESSAGE("experiment: cycle %d OFF - frames written %ld; next frame still had our value (we undid it) %ld times, game had rewritten it %ld times",
-					 cycle, g_levFrames, g_persisted, g_rewritten);
-
+			_MESSAGE("pose test: pose %d OFF - %ld frames written", k, g_poseFrames);
+			g_poseStart = 0;
 			Sleep(8000);
 		}
-		_MESSAGE("experiment: all cycles done");
+		_MESSAGE("pose test: all poses done");
 		return 0;
 	}
 }
 
-void SceneHooksStartExperiment(unsigned comIndex)
+void SceneHooksBindBones(const int * entryIndex)
+{
+	unsigned bound = 0;
+	for(int b = 0; b < 99; ++b)
+	{
+		g_boneEntry[b] = entryIndex[b];
+		if(entryIndex[b] >= 0) ++bound;
+	}
+	_MESSAGE("pose test: %u of 99 canonical bones are bound to flat-table entries (engine-owned and optional bones are left to the game)", bound);
+}
+
+void SceneHooksStartPoseTest()
 {
 	static bool started = false;
-	g_comIndex = comIndex;
+	if(started) return;
+	started = true;
 
-	if(comIndex == 0xFFFFFFFF) { _MESSAGE("experiment: 'NPC COM [COM ]' not found - not started"); return; }
+	if(FC_PoseCount() == 0) { _MESSAGE("pose test: the animation library is not loaded - not started"); return; }
 
-	_MESSAGE("experiment: automatic, centre-of-body bone = flat entry %u. In ~8 s the whole body should float up ~1 m and back, 4 times (6 s up-and-down, 8 s rest). Stand still in third person.", comIndex);
-	if(!started)
-	{
-		started = true;
-		HANDLE t = CreateThread(NULL, 0, CycleThread, NULL, 0, NULL);
-		if(t) CloseHandle(t);
-	}
+	HANDLE t = CreateThread(NULL, 0, CycleThread, NULL, 0, NULL);
+	if(t) CloseHandle(t);
 }
