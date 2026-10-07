@@ -140,3 +140,30 @@ bool FC_GetPose(int pose, float * out)
 	}
 	catch(...) { return false; }
 }
+
+float FC_MotionSeconds(int motion)
+{
+	if(!FC_BoneCount() || motion < 1 || motion > (int)fc::motionCount) return 0.0f;
+	const fc::Clip & clip = g_library->clips[motion - 1];
+	return clip.frames.size() >= 2 ? clip.seconds : 0.0f;
+}
+
+bool FC_SampleMotion(int motion, float phase, float * out)
+{
+	try
+	{
+		if(!out || FC_MotionSeconds(motion) <= 0.0f) return false;
+		const fc::Pose pose = g_library->sample((fc::Motion)motion, phase);
+		if(pose.size() != 99) return false;
+
+		for(int i = 0; i < 99; ++i)
+		{
+			const fc::Transform & r = pose[i];
+			float * o = out + i * 10;
+			o[0] = r.t.x; o[1] = r.t.y; o[2] = r.t.z; o[3] = r.q.x; o[4] = r.q.y; o[5] = r.q.z; o[6] = r.q.w;
+			o[7] = r.s.x; o[8] = r.s.y; o[9] = r.s.z;
+		}
+		return true;
+	}
+	catch(...) { return false; }
+}

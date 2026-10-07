@@ -154,12 +154,35 @@ namespace
 		*(float *)(base + sOff) = w.s;
 	}
 
-	Tr g_world[1024];
+	// ---- reproducao no tempo (passo 18) ----
+	volatile LONG		g_playing = 0, g_playFrames = 0, g_restReady = 0;
+	int					g_playMotion = 0;
+	float				g_playSeconds = 1.0f;
+	volatile DWORD		g_playStart = 0;
+	float				g_rest[99 * 10];
+	unsigned			g_fkBadIdx[12], g_fkBadCount = 0;
+	float				g_fkRecT = 0, g_fkRecRot = 0;
 
-	// Calcula as posicoes mundiais de todas as entradas. Se 'usePose', os ossos canonicos recebem a rotacao da pose.
+	Tr g_live[1024], g_world[1024], g_world2[1024];
+
+	// inversa de uma transformacao: R' = R^T, s' = 1/s, t' = -s' * R' * t
+	void Inv(const Tr & a, Tr * out)
+	{
+		for(int i = 0; i < 3; ++i)
+			for(int j = 0; j < 3; ++j)
+				out->r[i * 3 + j] = a.r[j * 3 + i];
+		out->s = 1.0f / a.s;
+		for(int i = 0; i < 3; ++i)
+			out->t[i] = -out->s * (out->r[i * 3 + 0] * a.t[0] + out->r[i * 3 + 1] * a.t[1] + out->r[i * 3 + 2] * a.t[2]);
+	}
+
+	// Calcula as posicoes mundiais de todas as entradas.
+	// A transformacao local de cada osso e a EFETIVA: a que reproduz exatamente o mundo que o jogo acabou de calcular
+	// (inversa(mundo do pai) * mundo do osso). Assim, ossos de fisica ou com sinalizadores especiais ficam como estao.
+	// Se 'usePose', os ossos canonicos recebem a rotacao da pose; o osso do centro do corpo (4) recebe tambem o
+	// deslocamento da pose em relacao ao repouso autoral (e ai que esta a subida de uma escalada).
 	bool ComputeWorlds(unsigned flat, bool usePose, unsigned entries, unsigned count)
 	{
-		// de que osso canonico e cada entrada (-1 = nenhum)
 		int boneOfEntry[1024];
 		for(unsigned i = 0; i < count; ++i) boneOfEntry[i] = -1;
 		if(usePose)
@@ -173,13 +196,27 @@ namespace
 		{
 			const unsigned e = entries + i * 0x78;
 			if(!ReadableMem(e, 0x78)) return false;
+			ReadWorld(e, 0x34, 0x58, 0x64, &g_live[i]);
+		}
 
-			Tr local;
-			LiveLocal(e, &local);
-			if(boneOfEntry[i] >= 0) FromQuat(g_pose + boneOfEntry[i] * 10 + 3, local.r);	// rotacao da pose; t e s ficam os do esqueleto real
-
+		for(unsigned i = 0; i < count; ++i)
+		{
+			const unsigned e = entries + i * 0x78;
 			const int parent = (int)(short)(*(const unsigned short *)(e + 0x68));
 			if(parent >= (int)i) return false;											// ordem inesperada: nao arriscar
+
+			Tr inv, local;
+			Inv(parent >= 0 ? g_live[parent] : root, &inv);
+			Mul(inv, g_live[i], &local);												// local efetiva
+
+			const int bone = boneOfEntry[i];
+			if(bone >= 0)
+			{
+				const float * p = g_pose + bone * 10;
+				FromQuat(p + 3, local.r);
+				if(bone == 4 && g_restReady)											// centro do corpo: soma o deslocamento da pose
+					for(int k = 0; k < 3; ++k) local.t[k] += p[k] - g_rest[bone * 10 + k];
+			}
 			Mul(parent >= 0 ? g_world[parent] : root, local, &g_world[i]);
 		}
 		return true;
@@ -188,17 +225,19 @@ namespace
 	// Depois da atualizacao do esqueleto do jogador.
 	void PostPass(unsigned flat)
 	{
-		const DWORD now = GetTickCount();
-		const bool poseOn = g_poseReady && g_poseStart && now >= g_poseStart && now <= g_poseEnd;
-		if(!poseOn && !g_fkCheckRequested) return;
+		const bool playing = g_playing && g_restReady;
+		if(!playing && !g_fkCheckRequested) return;
 
 		unsigned entries, count;
 		if(!FlatArray(flat, &entries, &count)) return;
 		if(InterlockedCompareExchange(&g_inPose, 1, 0) != 0) return;
 
-		if(poseOn)
+		if(playing)
 		{
-			if(ComputeWorlds(flat, true, entries, count))
+			float phase = (float)(GetTickCount() - g_playStart) / 1000.0f / g_playSeconds;
+			if(phase > 1.0f) phase = 1.0f;
+
+			if(FC_SampleMotion(g_playMotion, phase, g_pose) && ComputeWorlds(flat, true, entries, count))
 			{
 				for(unsigned i = 0; i < count; ++i)
 				{
@@ -207,25 +246,41 @@ namespace
 					const unsigned node = *(const unsigned *)(e + 0x70);
 					if(node && ReadableMem(node + 0x54, 0x34)) WriteWorld(node, 0x54, 0x78, 0x84, g_world[i]);	// no: mundo em +0x54
 				}
-				InterlockedIncrement(&g_poseFrames);
+				InterlockedIncrement(&g_playFrames);
 			}
 		}
 		else if(g_fkCheckRequested && ComputeWorlds(flat, false, entries, count))
 		{
-			// auto-verificacao: o que calculamos a partir das locais bate com o que o jogo calculou?
-			float maxT = 0, maxRot = 0; unsigned bad = 0;
+			// (A) a reconstrucao a partir das locais efetivas reproduz o mundo do jogo? (testa Mul e Inv)
+			float recT = 0, recRot = 0;
+			for(unsigned i = 0; i < count; ++i)
+			{
+				float dt = 0;
+				for(int k = 0; k < 3; ++k) { const float d = fabsf(g_live[i].t[k] - g_world[i].t[k]); if(d > dt) dt = d; }
+				const float dr = RotAngleDeg(g_live[i].r, g_world[i].r);
+				if(dt > recT) recT = dt;
+				if(dr > recRot) recRot = dr;
+			}
+
+			// (B) a hierarquia com as locais "diretas" (do no ou da entrada) bate com o mundo do jogo? Quais nao?
+			Tr root; ReadWorld(flat, 0x54, 0x78, 0x84, &root);
+			unsigned bad = 0, kept = 0; float maxT = 0, maxRot = 0;
 			for(unsigned i = 0; i < count; ++i)
 			{
 				const unsigned e = entries + i * 0x78;
-				Tr live; ReadWorld(e, 0x34, 0x58, 0x64, &live);
+				Tr local; LiveLocal(e, &local);
+				const int parent = (int)(short)(*(const unsigned short *)(e + 0x68));
+				Mul(parent >= 0 ? g_world2[parent] : root, local, &g_world2[i]);
+
 				float dt = 0;
-				for(int k = 0; k < 3; ++k) { const float d = fabsf(live.t[k] - g_world[i].t[k]); if(d > dt) dt = d; }
-				const float dr = RotAngleDeg(live.r, g_world[i].r);
+				for(int k = 0; k < 3; ++k) { const float d = fabsf(g_live[i].t[k] - g_world2[i].t[k]); if(d > dt) dt = d; }
+				const float dr = RotAngleDeg(g_live[i].r, g_world2[i].r);
 				if(dt > maxT) maxT = dt;
 				if(dr > maxRot) maxRot = dr;
-				if(dt > 0.5f || dr > 1.0f) ++bad;
+				if(dt > 0.5f || dr > 1.0f) { if(kept < 12) g_fkBadIdx[kept++] = i; ++bad; }
 			}
-			g_fkMaxT = maxT; g_fkMaxRotDeg = maxRot; g_fkEntries = count; g_fkMismatch = bad;
+			g_fkRecT = recT; g_fkRecRot = recRot;
+			g_fkMaxT = maxT; g_fkMaxRotDeg = maxRot; g_fkEntries = count; g_fkMismatch = bad; g_fkBadCount = kept;
 			InterlockedExchange(&g_fkCheckRequested, 0);
 			InterlockedExchange(&g_fkCheckDone, 1);
 		}
@@ -412,29 +467,42 @@ namespace
 		InterlockedExchange(&g_fkCheckRequested, 1);
 		for(int w = 0; w < 100 && !g_fkCheckDone; ++w) Sleep(100);
 		if(g_fkCheckDone)
-			_MESSAGE("pose test: FK self-check on %u entries: max position error %.3f units, max rotation error %.2f deg, %u entries off by more than 0.5 units / 1 deg",
-					 g_fkEntries, (double)g_fkMaxT, (double)g_fkMaxRotDeg, g_fkMismatch);
-		else
-			_MESSAGE("pose test: FK self-check did not run (no pass seen)");
-
-		// 2) as poses, uma de cada vez: 6 s a aplicar, 8 s de descanso
-		const int nPoses = FC_PoseCount();
-		_MESSAGE("pose test: %d poses will be applied one at a time (6 s each, 8 s rest). Watch the character from third person.", nPoses);
-		for(int k = 0; k < nPoses; ++k)
 		{
-			g_poseReady = 0;
-			if(!FC_GetPose(k, g_pose)) { _MESSAGE("pose test: pose %d '%s' could not be read - skipped", k, FC_PoseName(k)); continue; }
-			g_poseReady = 1;
-
-			const DWORD now = GetTickCount();
-			g_poseFrames = 0; g_poseStart = now; g_poseEnd = now + 6000;
-			_MESSAGE("pose test: pose %d ON  - '%s'", k, FC_PoseName(k));
-			Sleep(6500);
-			_MESSAGE("pose test: pose %d OFF - %ld frames written", k, g_poseFrames);
-			g_poseStart = 0;
-			Sleep(8000);
+			_MESSAGE("pose test: self-check A (rebuilding the game's own world from effective locals): max error %.4f units, %.3f deg  -> maths OK if ~0",
+					 (double)g_fkRecT, (double)g_fkRecRot);
+			char idx[200] = ""; int n = 0;
+			for(unsigned k = 0; k < g_fkBadCount && n >= 0; ++k) n += _snprintf_s(idx + n, sizeof(idx) - n, _TRUNCATE, " %u", g_fkBadIdx[k]);
+			_MESSAGE("pose test: self-check B (hierarchy from direct local transforms): %u of %u entries differ from the game's world (max %.1f units, %.1f deg). First ones:%s",
+					 g_fkMismatch, g_fkEntries, (double)g_fkMaxT, (double)g_fkMaxRotDeg, idx);
 		}
-		_MESSAGE("pose test: all poses done");
+		else
+			_MESSAGE("pose test: self-check did not run (no pass seen)");
+
+		// 2) o repouso autoral (referencia do deslocamento do centro do corpo)
+		g_restReady = FC_GetPose(0, g_rest) ? 1 : 0;
+		if(!g_restReady) { _MESSAGE("pose test: could not read the authored rest pose - stopping"); return 0; }
+
+		// 3) movimentos reais, um de cada vez, na velocidade real: 4 s de pausa entre eles
+		struct Item { int id; const char * name; };
+		const Item items[] = { { 42, "contextMantle (climb over a ledge)" }, { 2, "up (climb a wall)" }, { 11, "hopUp" },
+							   { 27, "kickUp" }, { 30, "flipUp (flip)" }, { 8, "reach" } };
+		_MESSAGE("pose test: %d real FreeClimb motions will play one at a time, at real speed, 4 s apart. Watch the character from third person.",
+				 (int)(sizeof(items) / sizeof(items[0])));
+
+		for(size_t k = 0; k < sizeof(items) / sizeof(items[0]); ++k)
+		{
+			const float secs = FC_MotionSeconds(items[k].id);
+			if(secs <= 0.0f) { _MESSAGE("pose test: motion %d '%s' not available - skipped", items[k].id, items[k].name); continue; }
+
+			g_playMotion = items[k].id; g_playSeconds = secs; g_playFrames = 0; g_playStart = GetTickCount();
+			InterlockedExchange(&g_playing, 1);
+			_MESSAGE("pose test: PLAYING '%s' (%.2f s)", items[k].name, (double)secs);
+			Sleep((DWORD)(secs * 1000.0f) + 400);
+			InterlockedExchange(&g_playing, 0);
+			_MESSAGE("pose test: finished '%s' - %ld frames written", items[k].name, g_playFrames);
+			Sleep(4000);
+		}
+		_MESSAGE("pose test: all motions done");
 		return 0;
 	}
 }

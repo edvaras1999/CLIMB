@@ -22,3 +22,7 @@ const char *	FC_BoneName(int bone);		// nome do osso canonico (ex. "NPC L UpperA
 int			FC_PoseCount();
 const char *	FC_PoseName(int pose);
 bool		FC_GetPose(int pose, float * out990);
+
+// ---- movimentos do pacote tocados ao longo do tempo ----
+float		FC_MotionSeconds(int motion);						// duracao real do movimento (0 se nao existe)
+bool		FC_SampleMotion(int motion, float phase, float * out990);	// pose na fase 0..1, interpolada
