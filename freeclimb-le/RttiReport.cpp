@@ -601,7 +601,6 @@ namespace
 					if(_stricmp(boneName, entryNames[i].c_str()) == 0) { map[bone] = (int)i; break; }
 			}
 			SceneHooksBindBones(map);
-			SceneHooksStartPoseTest();
 		}
 
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));

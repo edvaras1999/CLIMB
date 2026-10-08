@@ -17,3 +17,14 @@ void SceneHooksBindBones(const int * entryIndex);
 
 // Depois de o jogador andar e parar, verifica a matematica e aplica 5 poses, uma de cada vez (6 s cada).
 void SceneHooksStartPoseTest();
+
+// ---- passo 19: reproduzir uma animacao do FreeClimb a pedido do jogo ----
+typedef void (*SceneFinishCallback)();
+
+// Toca um movimento no corpo do jogador. 'scaleY' e 'scaleZ' ajustam o deslocamento do centro do corpo
+// (para a frente e para cima) ao tamanho real da borda. 'onFinish' e chamada no fim, na thread que atualiza o esqueleto.
+bool SceneHooksPlayMotion(int motion, float scaleY, float scaleZ, SceneFinishCallback onFinish);
+bool SceneHooksIsPlaying();
+
+// Direcao para onde o corpo do jogador olha (plana, unitaria), lida da rotacao do no raiz.
+bool SceneHooksRootForward(float * x, float * y);

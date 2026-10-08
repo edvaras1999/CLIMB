@@ -160,6 +160,8 @@ namespace
 	float				g_playSeconds = 1.0f;
 	volatile DWORD		g_playStart = 0;
 	float				g_rest[99 * 10];
+	float				g_scaleY = 1.0f, g_scaleZ = 1.0f;
+	SceneFinishCallback	g_finishCb = NULL;
 	unsigned			g_fkBadIdx[12], g_fkBadCount = 0;
 	float				g_fkRecT = 0, g_fkRecRot = 0;
 
@@ -215,7 +217,11 @@ namespace
 				const float * p = g_pose + bone * 10;
 				FromQuat(p + 3, local.r);
 				if(bone == 4 && g_restReady)											// centro do corpo: soma o deslocamento da pose
-					for(int k = 0; k < 3; ++k) local.t[k] += p[k] - g_rest[bone * 10 + k];
+				{
+					local.t[0] += (p[0] - g_rest[bone * 10 + 0]);
+					local.t[1] += (p[1] - g_rest[bone * 10 + 1]) * g_scaleY;			// para a frente, ajustado a borda
+					local.t[2] += (p[2] - g_rest[bone * 10 + 2]) * g_scaleZ;			// para cima, ajustado a borda
+				}
 			}
 			Mul(parent >= 0 ? g_world[parent] : root, local, &g_world[i]);
 		}
@@ -232,10 +238,11 @@ namespace
 		if(!FlatArray(flat, &entries, &count)) return;
 		if(InterlockedCompareExchange(&g_inPose, 1, 0) != 0) return;
 
+		bool finished = false;
 		if(playing)
 		{
 			float phase = (float)(GetTickCount() - g_playStart) / 1000.0f / g_playSeconds;
-			if(phase > 1.0f) phase = 1.0f;
+			if(phase >= 1.0f) { phase = 1.0f; finished = true; }
 
 			if(FC_SampleMotion(g_playMotion, phase, g_pose) && ComputeWorlds(flat, true, entries, count))
 			{
@@ -286,6 +293,14 @@ namespace
 		}
 
 		InterlockedExchange(&g_inPose, 0);
+
+		if(finished)
+		{
+			InterlockedExchange(&g_playing, 0);
+			SceneFinishCallback cb = g_finishCb;
+			g_finishCb = NULL;
+			if(cb) cb();
+		}
 	}
 
 	typedef void (__thiscall * Fn2)(void *, void *, unsigned);	// (this, dados, flags)  ret 8
@@ -515,7 +530,8 @@ void SceneHooksBindBones(const int * entryIndex)
 		g_boneEntry[b] = entryIndex[b];
 		if(entryIndex[b] >= 0) ++bound;
 	}
-	_MESSAGE("pose test: %u of 99 canonical bones are bound to flat-table entries (engine-owned and optional bones are left to the game)", bound);
+	g_restReady = FC_GetPose(0, g_rest) ? 1 : 0;
+	_MESSAGE("pose engine: %u of 99 canonical bones are bound to flat-table entries; authored rest pose %s", bound, g_restReady ? "loaded" : "NOT available");
 }
 
 void SceneHooksStartPoseTest()
@@ -528,4 +544,40 @@ void SceneHooksStartPoseTest()
 
 	HANDLE t = CreateThread(NULL, 0, CycleThread, NULL, 0, NULL);
 	if(t) CloseHandle(t);
+}
+
+bool SceneHooksPlayMotion(int motion, float scaleY, float scaleZ, SceneFinishCallback onFinish)
+{
+	if(g_playing || !g_restReady || !g_playerFlat) return false;
+
+	bool bound = false;
+	for(int b = 0; b < 99; ++b) if(g_boneEntry[b] >= 0) bound = true;
+	if(!bound) return false;
+
+	const float secs = FC_MotionSeconds(motion);
+	if(secs <= 0.0f) return false;
+
+	g_playMotion = motion; g_playSeconds = secs; g_scaleY = scaleY; g_scaleZ = scaleZ; g_finishCb = onFinish;
+	g_playFrames = 0; g_playStart = GetTickCount();
+	InterlockedExchange(&g_playing, 1);
+	return true;
+}
+
+bool SceneHooksIsPlaying()
+{
+	return g_playing != 0;
+}
+
+bool SceneHooksRootForward(float * x, float * y)
+{
+	const unsigned root = g_playerRoot;
+	if(!root || !ReadableMem(root + 0x54, 36)) return false;
+
+	const float * r = (const float *)(root + 0x54);		// rotacao mundial do no raiz, linhas
+	const float fx = r[1], fy = r[4];						// coluna 1 = o eixo Y local (frente) no mundo
+	const float len = sqrtf(fx * fx + fy * fy);
+	if(len < 0.001f) return false;
+
+	*x = fx / len; *y = fy / len;
+	return true;
 }

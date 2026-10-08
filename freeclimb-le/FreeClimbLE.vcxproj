@@ -112,6 +112,25 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="FreeClimbLE.cpp" />
+    <ClCompile Include="..\..\skse\skse\SafeWrite.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameAPI.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameMenus.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameTypes.cpp" />
+    <ClCompile Include="..\..\skse\skse\NiTypes.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameInput.cpp" />
+    <ClCompile Include="..\..\skse\skse\InputMap.cpp" />
+    <ClCompile Include="..\..\skse\skse\ScaleformAPI.cpp" />
+    <ClCompile Include="..\..\skse\skse\ScaleformCallbacks.cpp" />
+    <ClCompile Include="..\..\skse\skse\ScaleformMovie.cpp" />
+    <ClCompile Include="..\..\skse\skse\PapyrusNativeFunctions.cpp" />
+    <ClCompile Include="..\..\skse\skse\PapyrusArgs.cpp" />
+    <ClCompile Include="..\..\skse\skse\PapyrusVM.cpp" />
+    <ClCompile Include="..\..\skse\skse\HashUtil.cpp" />
+    <ClCompile Include="..\..\skse\skse\Utilities.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameRTTI.cpp" />
+    <ClCompile Include="Engine.cpp" />
+    <ClCompile Include="Havok.cpp" />
+    <ClCompile Include="Gameplay.cpp" />
     <ClCompile Include="VtableScan.cpp" />
     <ClCompile Include="RttiReport.cpp" />
     <ClCompile Include="SceneHooks.cpp" />
@@ -160,6 +179,9 @@
     <ClInclude Include="VtableScan.h" />
     <ClInclude Include="RttiReport.h" />
     <ClInclude Include="SceneHooks.h" />
+    <ClInclude Include="Engine.h" />
+    <ClInclude Include="Havok.h" />
+    <ClInclude Include="Gameplay.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="FreeClimbLE.rc" />
