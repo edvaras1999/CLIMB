@@ -62,6 +62,7 @@ namespace
 	int					g_boneEntry[99];
 	int					g_weaponPelvisEntry = -1;
 	volatile LONG		g_weaponPoseProbeFrames = 0;
+	const int			kWeaponPoseProbeMotion = 42;
 	volatile LONG		g_fkCheckRequested = 0, g_fkCheckDone = 0;
 	float				g_fkMaxT = 0, g_fkMaxRotDeg = 0;
 	unsigned			g_fkEntries = 0, g_fkMismatch = 0;
@@ -261,7 +262,8 @@ namespace
 			{
 				const int comEntry = g_boneEntry[4];
 				const LONG probeFrame = g_weaponPoseProbeFrames;
-				const bool probeWeapon = probeFrame < 4 && comEntry >= 0 && g_weaponPelvisEntry >= 0 &&
+				const bool probeWeapon = g_playMotion == kWeaponPoseProbeMotion && probeFrame < 4 &&
+					comEntry >= 0 && g_weaponPelvisEntry >= 0 &&
 					(unsigned)comEntry < count && (unsigned)g_weaponPelvisEntry < count;
 				unsigned weaponNode = 0;
 				if(probeWeapon) {
@@ -613,7 +615,6 @@ bool SceneHooksPlayMotion(int motion, float scaleY, float scaleZ, SceneFinishCal
 	g_playMotion = motion; g_playSeconds = secs; g_scaleY = scaleY; g_scaleZ = scaleZ; g_finishCb = onFinish;
 	InterlockedExchange(&g_playLooping, 0);
 	g_playFrames = 0; g_playStart = GetTickCount();
-	InterlockedExchange(&g_weaponPoseProbeFrames, 0);
 	InterlockedExchange(&g_playing, 1);
 	return true;
 }
@@ -628,7 +629,6 @@ bool SceneHooksPlayLoopingMotion(int motion)
 	if(secs <= 0.0f) return false;
 	g_playMotion = motion; g_playSeconds = secs; g_scaleY = 0.0f; g_scaleZ = 0.0f; g_finishCb = NULL;
 	g_playFrames = 0; g_playStart = GetTickCount();
-	InterlockedExchange(&g_weaponPoseProbeFrames, 0);
 	InterlockedExchange(&g_playLooping, 1);
 	InterlockedExchange(&g_playing, 1);
 	return true;
