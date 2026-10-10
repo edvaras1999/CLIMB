@@ -222,7 +222,9 @@ namespace
 		const char * reason = "";
 		if(!FindLedge(player, &ledge, &reason))
 		{
-			if(strcmp(reason, "no wall ahead") != 0)
+			const bool legacyWallSearchFailed = strcmp(reason, "no wall ahead") == 0;
+			const bool legacyTopSearchFailed = strcmp(reason, "no flat top behind the wall") == 0;
+			if(!legacyWallSearchFailed && !legacyTopSearchFailed)
 			{
 				_MESSAGE("gameplay: jump pressed near a wall but no climb: %s", reason);
 				return false;
@@ -234,7 +236,8 @@ namespace
 				_MESSAGE("gameplay: jump pressed near a wall but no climb: %s", reason);
 				return false;
 			}
-			_MESSAGE("gameplay: FreeClimb traversal search found a ledge missed by the legacy probe");
+			_MESSAGE("gameplay: FreeClimb traversal search found a ledge missed by the legacy %s",
+					 legacyWallSearchFailed ? "wall probe" : "top probe");
 		}
 
 		// o clipe sobe 132.3 e avanca 62.9: ajusta a escala ao tamanho real da borda e a distancia a parede
