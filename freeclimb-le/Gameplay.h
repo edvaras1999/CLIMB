@@ -1,7 +1,6 @@
-// Gameplay.h - entrada e controle de traversal no Skyrim LE.
-// Pressionar SALTAR perto de uma parede tenta agarrar; as teclas de movimento controlam a subida/descida.
-// SALTAR no agarrão inicia mantle apenas com topo validado; sem rota segura, solta o jogador.
-// Uma pressão consumida só volta a ser aceita depois de soltar SALTAR e pressionar de novo.
+// Gameplay.h - controles de mantle no Skyrim LE.
+// O agarrão e o traversal contínuos estão desativados; SALTAR ainda tenta o mantle legado
+// somente quando uma borda válida é detectada e o destino passa pelas verificações de segurança.
 #pragma once
 
 void InstallGameplay();
