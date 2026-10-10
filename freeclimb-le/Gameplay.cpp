@@ -154,7 +154,11 @@ namespace
 		const NiPoint3 feet = Engine::Position(player);
 		if(!traversal.attach(world, fc::Vec{feet.x, feet.y, feet.z},
 							 fc::Vec{fx, fy, 0.0f}, 1000.0f, 90.0f))
+		{
+			_MESSAGE("gameplay: traversal attach rejected: %s (distance %.1f)",
+					 fc::name(traversal.lastFailure), (double)traversal.lastAttachDistance);
 			return false;
+		}
 
 		fc::Input input;
 		input.y = 1.0f;
@@ -173,7 +177,11 @@ namespace
 				if(!target.finite() || !isfinite(forward) || !isfinite(side) || !isfinite(height) ||
 					forward < 20.0f || forward > 180.0f || fabsf(side) > 1.5f ||
 					height < kMinHeight || height > kMaxHeight)
+				{
+					_MESSAGE("gameplay: traversal mantle target rejected: forward %.1f side %.1f height %.1f",
+							 (double)forward, (double)side, (double)height);
 					return false;
+				}
 
 				out->wallDistance = forward;
 				out->height = height;
@@ -182,8 +190,15 @@ namespace
 				out->forwardY = fy;
 				return true;
 			}
-			if(result.released || !traversal.active()) return false;
+			if(result.released || !traversal.active())
+			{
+				_MESSAGE("gameplay: traversal search ended before mantle: %s; ledge=%s",
+						 result.reason, traversal.ledgeReason);
+				return false;
+			}
 		}
+		_MESSAGE("gameplay: traversal search did not settle on a mantle: state=%u; ledge=%s",
+				 (unsigned)traversal.state, traversal.ledgeReason);
 		return false;
 	}
 
