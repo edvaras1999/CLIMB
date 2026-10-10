@@ -42,6 +42,8 @@ namespace
 	float				g_destX = 0, g_destY = 0, g_destZ = 0;
 	CRITICAL_SECTION	g_traversalLock;
 	volatile LONG		g_traversalLockReady = 0;
+	volatile LONG		g_jumpConsumedUntilRelease = 0;
+	volatile LONG		g_traversalCooldownUntil = 0;
 	fc::Traversal		g_traversal;
 	bool				g_traversalActive = false, g_traversalMantling = false, g_mantleRequested = false;
 	DWORD				g_traversalLastTick = 0;
@@ -53,6 +55,7 @@ namespace
 	const int			kMantle = 42;
 	const float			kMantleForward = 62.9f, kMantleUp = 132.3f;
 	const float			kMinHeight = 80.0f, kMaxHeight = 180.0f;		// bordas alcancaveis (unidades do Skyrim)
+	const DWORD			kTraversalCooldownMs = 750;
 
 	NiPoint3 Add(const NiPoint3 & a, const NiPoint3 & b)	{ return NiPoint3(a.x + b.x, a.y + b.y, a.z + b.z); }
 	NiPoint3 Scale(const NiPoint3 & a, float s)				{ return NiPoint3(a.x * s, a.y * s, a.z * s); }
@@ -110,6 +113,32 @@ namespace
 		~TraversalGuard() { LeaveCriticalSection(&g_traversalLock); }
 	};
 
+	void StartTraversalCooldown()
+	{
+		InterlockedExchange(&g_traversalCooldownUntil, (LONG)(GetTickCount() + kTraversalCooldownMs));
+	}
+
+	bool TraversalCooldownActive()
+	{
+		const DWORD until = (DWORD)InterlockedCompareExchange(&g_traversalCooldownUntil, 0, 0);
+		return (LONG)(until - GetTickCount()) > 0;
+	}
+
+	bool TraversalMantling()
+	{
+		if(!g_traversalLockReady) return false;
+		TraversalGuard guard;
+		return g_traversalActive && g_traversalMantling;
+	}
+
+	void StopTraversalVelocity(Actor * player)
+	{
+		void * ctrl = player ? Engine::CharController(player) : NULL;
+		if(!ctrl) return;
+		__declspec(align(16)) float stop[4] = { 0, 0, 0, 0 };
+		Engine::ControllerSetLinearVelocity(ctrl, stop);
+	}
+
 	void SetTraversalPosition(Actor * player, fc::Vec position, bool stopVelocity)
 	{
 		void * ctrl = player ? Engine::CharController(player) : NULL;
@@ -126,16 +155,34 @@ namespace
 		}
 	}
 
+	void AbortTraversal(Actor * player, const char * reason)
+	{
+		SceneHooksStopMotion();
+		SceneHooksSetFrameCallback(NULL);
+		StopTraversalVelocity(player);
+		g_traversal.stop();
+		g_traversalActive = false;
+		g_traversalMantling = false;
+		g_mantleRequested = false;
+		g_traversalLoopMotion = 0;
+		g_traversalLastTick = 0;
+		StartTraversalCooldown();
+		_MESSAGE("gameplay: traversal aborted without repositioning: %s", reason);
+	}
+
 	void FinishTraversalMantle()
 	{
 		TraversalGuard guard;
+		if(!g_traversalActive || !g_traversalMantling) return;
 		Actor * player = (Actor *)Engine::Player();
 		SetTraversalPosition(player, g_traversalDestination, true);
 		g_traversal.stop();
 		g_traversalActive = false;
 		g_traversalMantling = false;
 		g_traversalLoopMotion = 0;
+		g_traversalLastTick = 0;
 		SceneHooksSetFrameCallback(NULL);
+		StartTraversalCooldown();
 		_MESSAGE("gameplay: traversal mantle finished at (%.0f %.0f %.0f)",
 				 (double)g_traversalDestination.x, (double)g_traversalDestination.y, (double)g_traversalDestination.z);
 	}
@@ -149,11 +196,7 @@ namespace
 		void * ctrl = player ? Engine::CharController(player) : NULL;
 		if(!player || !ctrl)
 		{
-			SceneHooksStopMotion();
-			SceneHooksSetFrameCallback(NULL);
-			g_traversal.stop();
-			g_traversalActive = false;
-			_MESSAGE("gameplay: traversal cancelled because the player controller disappeared");
+			AbortTraversal(player, "the player controller disappeared");
 			return;
 		}
 
@@ -173,17 +216,32 @@ namespace
 
 		TraversalWorld world(player);
 		const fc::Result result = g_traversal.update(world, input, dt, 1000.0f);
+		if(input.mantle && g_traversal.state != fc::State::mantle)
+		{
+			AbortTraversal(player, "jump requested an exit but no validated mantle path was available");
+			return;
+		}
 		if(g_traversal.state == fc::State::mantle && result.motion == fc::Motion::contextMantle)
 		{
 			g_traversalDestination = g_traversal.topTarget();
 			const NiPoint3 current = Engine::Position(player);
-			float fx = 0.0f, fy = 1.0f;
-			SceneHooksRootForward(&fx, &fy);
+			const fc::Vec outward = g_traversal.normal.unit();
 			const float dx = g_traversalDestination.x - current.x;
 			const float dy = g_traversalDestination.y - current.y;
-			const float forward = dx * fx + dy * fy;
-			const float scaleY = std::clamp(forward / kMantleForward, 0.25f, 2.0f);
-			const float scaleZ = std::clamp((g_traversalDestination.z - current.z) / kMantleUp, 0.25f, 2.0f);
+			const float forward = -(dx * outward.x + dy * outward.y);
+			const float side = dx * -outward.y + dy * outward.x;
+			const float height = g_traversalDestination.z - current.z;
+			const float scaleY = forward / kMantleForward;
+			const float scaleZ = height / kMantleUp;
+
+			if(!g_traversalDestination.finite() || outward.length() < 0.9f ||
+				!std::isfinite(forward) || !std::isfinite(side) || !std::isfinite(height) ||
+				scaleY < 0.25f || scaleY > 2.0f || scaleZ < 0.25f || scaleZ > 2.0f ||
+				std::abs(side) > 8.0f)
+			{
+				AbortTraversal(player, "mantle target is outside the animation's checked forward/up/side envelope");
+				return;
+			}
 
 			SceneHooksStopMotion();
 			if(SceneHooksPlayMotion(kMantle, scaleY, scaleZ, &FinishTraversalMantle))
@@ -195,31 +253,29 @@ namespace
 			}
 			else
 			{
-				SetTraversalPosition(player, g_traversalDestination, true);
-				g_traversal.stop();
-				g_traversalActive = false;
-				SceneHooksSetFrameCallback(NULL);
-				_MESSAGE("gameplay: mantle pose unavailable; placed player at validated ledge destination");
+				AbortTraversal(player, "validated ledge found but mantle pose could not start");
 			}
 			return;
 		}
 
 		if(result.released || !g_traversal.active())
 		{
-			const fc::Vec finalPosition = g_traversal.position;
-			SceneHooksStopMotion();
-			SetTraversalPosition(player, finalPosition, true);
-			g_traversal.stop();
-			g_traversalActive = false;
-			g_traversalMantling = false;
-			g_traversalLoopMotion = 0;
-			SceneHooksSetFrameCallback(NULL);
-			_MESSAGE("gameplay: traversal released: %s", result.reason);
+			AbortTraversal(player, result.reason);
 			return;
 		}
 
 		if(g_traversal.state != fc::State::mantle)
+		{
+			const NiPoint3 actual = Engine::Position(player);
+			const fc::Vec delta = g_traversal.position - fc::Vec{actual.x, actual.y, actual.z};
+			const float allowedStep = g_traversal.state == fc::State::approach ? 32.0f : 18.0f;
+			if(!g_traversal.position.finite() || !delta.finite() || delta.length() > allowedStep)
+			{
+				AbortTraversal(player, "controller position diverged from the collision-checked traversal path");
+				return;
+			}
 			SetTraversalPosition(player, g_traversal.position, true);
+		}
 
 		const int motion = (int)result.motion;
 		if((motion >= (int)fc::Motion::hang && motion <= (int)fc::Motion::right) ||
@@ -237,6 +293,7 @@ namespace
 
 	bool TryStartTraversal()
 	{
+		if(TraversalCooldownActive()) return false;
 		Actor * player = (Actor *)Engine::Player();
 		if(!player || !Engine::CharController(player) || SceneHooksIsPlaying()) return false;
 
@@ -385,6 +442,12 @@ namespace
 	// Chamada no fim da animacao (na thread que atualiza o esqueleto): coloca o personagem em cima da borda.
 	void OnClimbFinished()
 	{
+		if(!InterlockedCompareExchange(&g_climbing, 0, 0))
+		{
+			_MESSAGE("gameplay: ignored a stale legacy mantle completion callback");
+			return;
+		}
+
 		Actor * player = (Actor *)Engine::Player();
 		void * ctrl = player ? Engine::CharController(player) : NULL;
 		if(ctrl)
@@ -401,6 +464,7 @@ namespace
 			Engine::ControllerSetLinearVelocity(ctrl, stop);
 		}
 		_MESSAGE("gameplay: climb finished - player placed on top at (%.0f %.0f %.0f)", (double)g_destX, (double)g_destY, (double)g_destZ);
+		StartTraversalCooldown();
 		InterlockedExchange(&g_climbing, 0);
 	}
 
@@ -464,29 +528,45 @@ namespace
 		{
 			_MESSAGE("gameplay: climb timed out - releasing the controls");
 			InterlockedExchange(&g_climbing, 0);
+			SceneHooksStopMotion();
+			StartTraversalCooldown();
 		}
 		return g_climbing != 0;
 	}
 
 	bool __fastcall Hook_JumpCanProcess(void * handler, void *, InputEvent * event)
 	{
-		if(Climbing()) return false;
 		return g_origJumpCan(handler, event);
 	}
 
 	bool __fastcall Hook_MoveCanProcess(void * handler, void *, InputEvent * event)
 	{
-		if(Climbing()) return false;
+		if(Climbing() || TraversalMantling()) return false;
 		return g_origMoveCan(handler, event);
 	}
 
 	void __fastcall Hook_JumpButton(void * handler, void *, ButtonEvent * event, void * data)
 	{
-		if(event && !Climbing())
+		if(event)
 		{
 			const float value = *(float *)&event->flags;
-			const bool isDown = (value != 0.0f) && (event->timer == 0.0f);
-			if(isDown)
+			if(value == 0.0f)
+			{
+				InterlockedExchange(&g_jumpConsumedUntilRelease, 0);
+				g_origJumpButton(handler, event, data);
+				return;
+			}
+
+			if(InterlockedCompareExchange(&g_jumpConsumedUntilRelease, 0, 0))
+				return;
+
+			if(Climbing())
+			{
+				InterlockedExchange(&g_jumpConsumedUntilRelease, 1);
+				return;
+			}
+
+			if(event->timer == 0.0f)
 			{
 				bool handled = false;
 				if(g_traversalLockReady)
@@ -497,10 +577,20 @@ namespace
 						if(!g_traversalMantling) g_mantleRequested = true;
 						handled = true;
 					}
-					else
+					else if(!TraversalCooldownActive())
 						handled = TryStartTraversal();
 				}
-				if(handled || TryStartClimb()) return;	// a pressao foi consumida: nao ha salto
+
+				if(handled)
+				{
+					InterlockedExchange(&g_jumpConsumedUntilRelease, 1);
+					return;
+				}
+				if(!TraversalCooldownActive() && TryStartClimb())
+				{
+					InterlockedExchange(&g_jumpConsumedUntilRelease, 1);
+					return;
+				}
 			}
 		}
 		g_origJumpButton(handler, event, data);
@@ -514,5 +604,5 @@ void InstallGameplay()
 	PatchSlot(kJumpHandler,		kSlot_CanProcess,	(void *)&Hook_JumpCanProcess,	&g_origJumpCan);
 	PatchSlot(kMovementHandler,	kSlot_CanProcess,	(void *)&Hook_MoveCanProcess,	&g_origMoveCan);
 	PatchSlot(kJumpHandler,		kSlot_ProcessButton,(void *)&Hook_JumpButton,		&g_origJumpButton);
-	_MESSAGE("gameplay: installed - press JUMP near a wall to grab; use movement keys to climb and press JUMP at a ledge to mantle");
+	_MESSAGE("gameplay: installed - press JUMP near a wall to grab; use movement keys to climb; press JUMP at a valid ledge to mantle, or release from the wall if no mantle path is valid");
 }
