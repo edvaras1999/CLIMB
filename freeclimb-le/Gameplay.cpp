@@ -194,7 +194,9 @@ namespace
 		{
 			const float value = *(float *)&event->flags;
 			const bool isDown = (value != 0.0f) && (event->timer == 0.0f);
-			if(isDown && TryStartClimb()) return;		// a pressao foi "consumida": nao ha salto
+			Actor * player = (Actor *)Engine::Player();
+			const bool sneakHeld = player && (Engine::ActorFlags1(player) & Engine::kFlag1_Sneaking);
+			if(isDown && sneakHeld && TryStartClimb()) return;
 		}
 		g_origJumpButton(handler, event, data);
 	}
@@ -205,5 +207,5 @@ void InstallGameplay()
 	PatchSlot(kJumpHandler,		kSlot_CanProcess,	(void *)&Hook_JumpCanProcess,	&g_origJumpCan);
 	PatchSlot(kMovementHandler,	kSlot_CanProcess,	(void *)&Hook_MoveCanProcess,	&g_origMoveCan);
 	PatchSlot(kJumpHandler,		kSlot_ProcessButton,(void *)&Hook_JumpButton,		&g_origJumpButton);
-	_MESSAGE("gameplay: installed - press JUMP next to a wall 80 to 180 units high (about 1.1 to 2.5 m) to climb it");
+	_MESSAGE("gameplay: installed - hold SNEAK and press JUMP next to a wall 80 to 180 units high (about 1.1 to 2.5 m) to climb it");
 }
