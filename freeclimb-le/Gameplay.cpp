@@ -13,6 +13,12 @@
 #include "Havok.h"
 #include "Log.h"
 #include "SceneHooks.h"
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #include "src/Core.h"
 
 #include "skse/GameInput.h"
