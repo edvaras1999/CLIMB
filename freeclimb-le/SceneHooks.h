@@ -14,6 +14,7 @@ void SceneHooksStartReport();
 // Passo 17: aplica ao esqueleto do jogador poses REAIS do pacote de animacoes do FreeClimb.
 // 'entryIndex' tem 99 posicoes: o indice da entrada da tabela achatada de cada osso canonico (-1 = nenhum).
 void SceneHooksBindBones(const int * entryIndex);
+void SceneHooksSetWeaponPelvisEntry(int entryIndex);
 
 // Depois de o jogador andar e parar, verifica a matematica e aplica 5 poses, uma de cada vez (6 s cada).
 void SceneHooksStartPoseTest();

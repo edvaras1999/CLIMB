@@ -568,6 +568,7 @@ namespace
 			const unsigned entries = Rd32(ctx.flattened + 0xC0);
 			unsigned shown = 0, lastGood = 0;
 			std::vector<std::string> entryNames;
+			int weaponPelvisEntry = -1;
 			_MESSAGE("scene: --- ALL flat entries (index parent flags node name) ---");
 			for(unsigned i = 0; i < 1024 && entries; ++i)
 			{
@@ -580,6 +581,7 @@ namespace
 				if(entryName[0] == 0 && rotErr > 0.01f) { _MESSAGE("scene: E[%u] looks past the end (no name, rotErr=%.3f) - stop", i, rotErr); break; }
 
 				entryNames.push_back(entryName);
+				if(_stricmp(entryName, "Weapon Pelvis") == 0) weaponPelvisEntry = (int)i;
 				_MESSAGE("scene: E %u %d %08X %08X '%s'", i, (int)(short)Rd16(e + 0x68), Rd32(e + 0x6C), Rd32(e + 0x70), entryName);
 				lastGood = i; ++shown;
 			}
@@ -601,6 +603,7 @@ namespace
 					if(_stricmp(boneName, entryNames[i].c_str()) == 0) { map[bone] = (int)i; break; }
 			}
 			SceneHooksBindBones(map);
+			SceneHooksSetWeaponPelvisEntry(weaponPelvisEntry);
 		}
 
 		_MESSAGE("scene: probe took %u ms", (unsigned)(GetTickCount() - t0));

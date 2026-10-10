@@ -60,6 +60,8 @@ namespace
 	volatile LONG		g_poseReady = 0, g_poseFrames = 0;
 	float				g_pose[99 * 10];
 	int					g_boneEntry[99];
+	int					g_weaponPelvisEntry = -1;
+	volatile LONG		g_weaponPoseProbeFrames = 0;
 	volatile LONG		g_fkCheckRequested = 0, g_fkCheckDone = 0;
 	float				g_fkMaxT = 0, g_fkMaxRotDeg = 0;
 	unsigned			g_fkEntries = 0, g_fkMismatch = 0;
@@ -257,12 +259,44 @@ namespace
 
 			if(FC_SampleMotion(g_playMotion, phase, g_pose) && ComputeWorlds(flat, true, entries, count))
 			{
+				const int comEntry = g_boneEntry[4];
+				const LONG probeFrame = g_weaponPoseProbeFrames;
+				const bool probeWeapon = probeFrame < 4 && comEntry >= 0 && g_weaponPelvisEntry >= 0 &&
+					(unsigned)comEntry < count && (unsigned)g_weaponPelvisEntry < count;
+				unsigned weaponNode = 0;
+				if(probeWeapon) {
+					const unsigned weapon = entries + (unsigned)g_weaponPelvisEntry * 0x78;
+					weaponNode = *(const unsigned *)(weapon + 0x70);
+				}
 				for(unsigned i = 0; i < count; ++i)
 				{
 					const unsigned e = entries + i * 0x78;
 					WriteWorld(e, 0x34, 0x58, 0x64, g_world[i]);						// entrada: mundo em +0x34
 					const unsigned node = *(const unsigned *)(e + 0x70);
 					if(node && ReadableMem(node + 0x54, 0x34)) WriteWorld(node, 0x54, 0x78, 0x84, g_world[i]);	// no: mundo em +0x54
+				}
+				if(probeWeapon) {
+					InterlockedIncrement(&g_weaponPoseProbeFrames);
+					const Tr & comBefore = g_live[comEntry];
+					const Tr & comAfter = g_world[comEntry];
+					const Tr & weaponBefore = g_live[g_weaponPelvisEntry];
+					const Tr & weaponAfter = g_world[g_weaponPelvisEntry];
+					float nodeX = 0, nodeY = 0, nodeZ = 0;
+					if(weaponNode && ReadableMem(weaponNode + 0x78, 12)) {
+						nodeX = *(const float *)(weaponNode + 0x78);
+						nodeY = *(const float *)(weaponNode + 0x7C);
+						nodeZ = *(const float *)(weaponNode + 0x80);
+					}
+					const unsigned weapon = entries + (unsigned)g_weaponPelvisEntry * 0x78;
+					const int parent = (int)(short)(*(const unsigned short *)(weapon + 0x68));
+					_MESSAGE("poseprobe: frame %ld motion %d COM entry %d before=(%.2f %.2f %.2f) written=(%.2f %.2f %.2f) Weapon Pelvis entry %d parent %d before=(%.2f %.2f %.2f) written=(%.2f %.2f %.2f) node=%08X nodeWorld=(%.2f %.2f %.2f)",
+						(long)probeFrame, g_playMotion, comEntry,
+						(double)comBefore.t[0], (double)comBefore.t[1], (double)comBefore.t[2],
+						(double)comAfter.t[0], (double)comAfter.t[1], (double)comAfter.t[2],
+						g_weaponPelvisEntry, parent,
+						(double)weaponBefore.t[0], (double)weaponBefore.t[1], (double)weaponBefore.t[2],
+						(double)weaponAfter.t[0], (double)weaponAfter.t[1], (double)weaponAfter.t[2],
+						weaponNode, (double)nodeX, (double)nodeY, (double)nodeZ);
 				}
 				InterlockedIncrement(&g_playFrames);
 			}
@@ -546,6 +580,13 @@ void SceneHooksBindBones(const int * entryIndex)
 	_MESSAGE("pose engine: %u of 99 canonical bones are bound to flat-table entries; authored rest pose %s", bound, g_restReady ? "loaded" : "NOT available");
 }
 
+void SceneHooksSetWeaponPelvisEntry(int entryIndex)
+{
+	g_weaponPelvisEntry = entryIndex;
+	InterlockedExchange(&g_weaponPoseProbeFrames, 0);
+	_MESSAGE("poseprobe: Weapon Pelvis flat entry %d", entryIndex);
+}
+
 void SceneHooksStartPoseTest()
 {
 	static bool started = false;
@@ -572,6 +613,7 @@ bool SceneHooksPlayMotion(int motion, float scaleY, float scaleZ, SceneFinishCal
 	g_playMotion = motion; g_playSeconds = secs; g_scaleY = scaleY; g_scaleZ = scaleZ; g_finishCb = onFinish;
 	InterlockedExchange(&g_playLooping, 0);
 	g_playFrames = 0; g_playStart = GetTickCount();
+	InterlockedExchange(&g_weaponPoseProbeFrames, 0);
 	InterlockedExchange(&g_playing, 1);
 	return true;
 }
@@ -586,6 +628,7 @@ bool SceneHooksPlayLoopingMotion(int motion)
 	if(secs <= 0.0f) return false;
 	g_playMotion = motion; g_playSeconds = secs; g_scaleY = 0.0f; g_scaleZ = 0.0f; g_finishCb = NULL;
 	g_playFrames = 0; g_playStart = GetTickCount();
+	InterlockedExchange(&g_weaponPoseProbeFrames, 0);
 	InterlockedExchange(&g_playLooping, 1);
 	InterlockedExchange(&g_playing, 1);
 	return true;
