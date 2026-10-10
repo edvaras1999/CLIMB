@@ -467,10 +467,10 @@ namespace
 		if(ctrl)
 		{
 			const NiPoint3 current = Engine::Position(player);
-			const fc::Vec target{g_destX, g_destY, g_destZ + 1.0f};
-			const float horizontal = std::hypot(target.x - current.x, target.y - current.y);
-			const float vertical = target.z - current.z;
-			if(!SafeWorldPosition(target) || !std::isfinite(horizontal) || !std::isfinite(vertical) ||
+			const fc::Vec mantleTarget{g_destX, g_destY, g_destZ + 1.0f};
+			const float horizontal = std::hypot(mantleTarget.x - current.x, mantleTarget.y - current.y);
+			const float vertical = mantleTarget.z - current.z;
+			if(!SafeWorldPosition(mantleTarget) || !std::isfinite(horizontal) || !std::isfinite(vertical) ||
 				horizontal > kMantleHorizontalLimit || vertical < 40.0f || vertical > kMantleVerticalLimit)
 			{
 				_MESSAGE("gameplay: legacy mantle completion rejected unsafe target delta (xy %.1f z %.1f)",
