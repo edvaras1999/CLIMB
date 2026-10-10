@@ -1,6 +1,6 @@
-// Gameplay.h - passo 19: o primeiro comportamento real do mod.
-// Carregar em SALTAR (Espaco) junto a uma borda alcancavel: o plugin deteta a borda com raios do Havok,
-// toca a animacao de subida (contextMantle) no corpo do personagem e, no fim, coloca-o em cima da borda.
+// Gameplay.h - entrada e controle de traversal no Skyrim LE.
+// Pressionar SALTAR perto de uma parede tenta agarrar; as teclas de movimento controlam a subida/descida,
+// e SALTAR novamente junto ao topo inicia a subida da borda. A rota antiga de mantle fica como fallback.
 #pragma once
 
 void InstallGameplay();

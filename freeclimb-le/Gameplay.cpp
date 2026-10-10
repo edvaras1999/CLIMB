@@ -1,7 +1,8 @@
-// Gameplay.cpp - passo 19. Reutiliza o codigo verificado do Freerun LE (Engine.h, Havok.h) para os raios,
-// o controlador do personagem e as unidades do Havok, e o motor de poses do FreeClimb (SceneHooks) para o desenho.
+// Gameplay.cpp - liga a state machine de traversal do FreeClimb aos controlos, Havok e poses do Skyrim LE.
 
+#include <algorithm>
 #include <math.h>
+#include <string.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -39,6 +40,13 @@ namespace
 	volatile LONG		g_climbing = 0;
 	volatile DWORD		g_climbStarted = 0;
 	float				g_destX = 0, g_destY = 0, g_destZ = 0;
+	CRITICAL_SECTION	g_traversalLock;
+	volatile LONG		g_traversalLockReady = 0;
+	fc::Traversal		g_traversal;
+	bool				g_traversalActive = false, g_traversalMantling = false, g_mantleRequested = false;
+	DWORD				g_traversalLastTick = 0;
+	int					g_traversalLoopMotion = 0;
+	fc::Vec				g_traversalDestination;
 
 	// motion 42 = contextMantle (subir por cima de uma borda). Deslocamento do centro do corpo no fim do clipe,
 	// em relacao ao repouso: ~62.9 para a frente (y) e ~132.3 para cima (z).
@@ -95,6 +103,178 @@ namespace
 	private:
 		Actor * m_actor;
 	};
+
+	struct TraversalGuard
+	{
+		TraversalGuard() { EnterCriticalSection(&g_traversalLock); }
+		~TraversalGuard() { LeaveCriticalSection(&g_traversalLock); }
+	};
+
+	void SetTraversalPosition(Actor * player, fc::Vec position, bool stopVelocity)
+	{
+		void * ctrl = player ? Engine::CharController(player) : NULL;
+		if(!ctrl || !position.finite()) return;
+		const float scale = Engine::HavokScale();
+		__declspec(align(16)) float target[4] = {
+			position.x * scale, position.y * scale, position.z * scale, 0.0f
+		};
+		Engine::ControllerSetPosition(ctrl, target, true, true);
+		if(stopVelocity)
+		{
+			__declspec(align(16)) float stop[4] = { 0, 0, 0, 0 };
+			Engine::ControllerSetLinearVelocity(ctrl, stop);
+		}
+	}
+
+	void FinishTraversalMantle()
+	{
+		TraversalGuard guard;
+		Actor * player = (Actor *)Engine::Player();
+		SetTraversalPosition(player, g_traversalDestination, true);
+		g_traversal.stop();
+		g_traversalActive = false;
+		g_traversalMantling = false;
+		g_traversalLoopMotion = 0;
+		SceneHooksSetFrameCallback(NULL);
+		_MESSAGE("gameplay: traversal mantle finished at (%.0f %.0f %.0f)",
+				 (double)g_traversalDestination.x, (double)g_traversalDestination.y, (double)g_traversalDestination.z);
+	}
+
+	void UpdateTraversalFrame()
+	{
+		TraversalGuard guard;
+		if(!g_traversalActive || g_traversalMantling) return;
+
+		Actor * player = (Actor *)Engine::Player();
+		void * ctrl = player ? Engine::CharController(player) : NULL;
+		if(!player || !ctrl)
+		{
+			SceneHooksStopMotion();
+			SceneHooksSetFrameCallback(NULL);
+			g_traversal.stop();
+			g_traversalActive = false;
+			_MESSAGE("gameplay: traversal cancelled because the player controller disappeared");
+			return;
+		}
+
+		const DWORD now = GetTickCount();
+		float dt = g_traversalLastTick ? (float)(now - g_traversalLastTick) / 1000.0f : 0.016f;
+		g_traversalLastTick = now;
+		if(dt > 0.05f) dt = 0.05f;
+
+		const UInt32 flags = Engine::ActorFlags1(player);
+		fc::Input input;
+		input.x = ((flags & Engine::kFlag1_MovingRight) ? 1.0f : 0.0f) -
+				  ((flags & Engine::kFlag1_MovingLeft) ? 1.0f : 0.0f);
+		input.y = ((flags & Engine::kFlag1_MovingForward) ? 1.0f : 0.0f) -
+				  ((flags & Engine::kFlag1_MovingBack) ? 1.0f : 0.0f);
+		input.mantle = g_mantleRequested;
+		g_mantleRequested = false;
+
+		TraversalWorld world(player);
+		const fc::Result result = g_traversal.update(world, input, dt, 1000.0f);
+		if(g_traversal.state == fc::State::mantle && result.motion == fc::Motion::contextMantle)
+		{
+			g_traversalDestination = g_traversal.topTarget();
+			const NiPoint3 current = Engine::Position(player);
+			float fx = 0.0f, fy = 1.0f;
+			SceneHooksRootForward(&fx, &fy);
+			const float dx = g_traversalDestination.x - current.x;
+			const float dy = g_traversalDestination.y - current.y;
+			const float forward = dx * fx + dy * fy;
+			const float scaleY = std::clamp(forward / kMantleForward, 0.25f, 2.0f);
+			const float scaleZ = std::clamp((g_traversalDestination.z - current.z) / kMantleUp, 0.25f, 2.0f);
+
+			SceneHooksStopMotion();
+			if(SceneHooksPlayMotion(kMantle, scaleY, scaleZ, &FinishTraversalMantle))
+			{
+				g_traversalMantling = true;
+				g_traversalLoopMotion = 0;
+				_MESSAGE("gameplay: traversal reached a ledge; starting mantle (forward %.1f, height %.1f)",
+						 (double)forward, (double)(g_traversalDestination.z - current.z));
+			}
+			else
+			{
+				SetTraversalPosition(player, g_traversalDestination, true);
+				g_traversal.stop();
+				g_traversalActive = false;
+				SceneHooksSetFrameCallback(NULL);
+				_MESSAGE("gameplay: mantle pose unavailable; placed player at validated ledge destination");
+			}
+			return;
+		}
+
+		if(result.released || !g_traversal.active())
+		{
+			const fc::Vec finalPosition = g_traversal.position;
+			SceneHooksStopMotion();
+			SetTraversalPosition(player, finalPosition, true);
+			g_traversal.stop();
+			g_traversalActive = false;
+			g_traversalMantling = false;
+			g_traversalLoopMotion = 0;
+			SceneHooksSetFrameCallback(NULL);
+			_MESSAGE("gameplay: traversal released: %s", result.reason);
+			return;
+		}
+
+		if(g_traversal.state != fc::State::mantle)
+			SetTraversalPosition(player, g_traversal.position, true);
+
+		const int motion = (int)result.motion;
+		if((motion >= (int)fc::Motion::hang && motion <= (int)fc::Motion::right) ||
+			motion == (int)fc::Motion::reach)
+		{
+			if(motion != g_traversalLoopMotion)
+			{
+				if(SceneHooksPlayLoopingMotion(motion))
+					g_traversalLoopMotion = motion;
+				else
+					_MESSAGE("gameplay: could not start traversal pose %d", motion);
+			}
+		}
+	}
+
+	bool TryStartTraversal()
+	{
+		Actor * player = (Actor *)Engine::Player();
+		if(!player || !Engine::CharController(player) || SceneHooksIsPlaying()) return false;
+
+		float fx, fy;
+		if(!SceneHooksRootForward(&fx, &fy)) return false;
+		const NiPoint3 feet = Engine::Position(player);
+		const bool inAir = Engine::PlayerIsInMidair();
+		TraversalWorld world(player);
+		g_traversal.reset();
+		g_traversal.cfg.approachSeconds = 0.18f;
+		g_traversal.cfg.staminaEnabled = false;
+		if(!g_traversal.attach(world, fc::Vec{feet.x, feet.y, feet.z},
+							   fc::Vec{fx, fy, 0.0f}, 1000.0f, 90.0f, inAir, !inAir))
+		{
+			if(g_traversal.lastFailure != fc::AttachFailure::noWall)
+				_MESSAGE("gameplay: wall grab not found: %s (distance %.1f)",
+						 fc::name(g_traversal.lastFailure), (double)g_traversal.lastAttachDistance);
+			return false;
+		}
+
+		g_traversalActive = true;
+		g_traversalMantling = false;
+		g_mantleRequested = false;
+		g_traversalLastTick = GetTickCount();
+		g_traversalLoopMotion = 0;
+		SceneHooksSetFrameCallback(&UpdateTraversalFrame);
+		if(!SceneHooksPlayLoopingMotion((int)fc::Motion::reach))
+		{
+			g_traversal.stop();
+			g_traversalActive = false;
+			SceneHooksSetFrameCallback(NULL);
+			_MESSAGE("gameplay: wall grab found, but the reach pose is unavailable");
+			return false;
+		}
+		g_traversalLoopMotion = (int)fc::Motion::reach;
+		_MESSAGE("gameplay: wall grab started; use movement keys to climb and press JUMP at the top to mantle");
+		return true;
+	}
 
 	// Raios do Havok: parede a frente, superficie de cima, espaco livre por cima.
 	bool FindLedge(Actor * player, Ledge * out, const char ** reason)
@@ -306,7 +486,22 @@ namespace
 		{
 			const float value = *(float *)&event->flags;
 			const bool isDown = (value != 0.0f) && (event->timer == 0.0f);
-			if(isDown && TryStartClimb()) return;		// a pressao foi "consumida": nao ha salto
+			if(isDown)
+			{
+				bool handled = false;
+				if(g_traversalLockReady)
+				{
+					TraversalGuard guard;
+					if(g_traversalActive)
+					{
+						if(!g_traversalMantling) g_mantleRequested = true;
+						handled = true;
+					}
+					else
+						handled = TryStartTraversal();
+				}
+				if(handled || TryStartClimb()) return;	// a pressao foi consumida: nao ha salto
+			}
 		}
 		g_origJumpButton(handler, event, data);
 	}
@@ -314,8 +509,10 @@ namespace
 
 void InstallGameplay()
 {
+	if(InterlockedCompareExchange(&g_traversalLockReady, 1, 0) == 0)
+		InitializeCriticalSectionAndSpinCount(&g_traversalLock, 4000);
 	PatchSlot(kJumpHandler,		kSlot_CanProcess,	(void *)&Hook_JumpCanProcess,	&g_origJumpCan);
 	PatchSlot(kMovementHandler,	kSlot_CanProcess,	(void *)&Hook_MoveCanProcess,	&g_origMoveCan);
 	PatchSlot(kJumpHandler,		kSlot_ProcessButton,(void *)&Hook_JumpButton,		&g_origJumpButton);
-	_MESSAGE("gameplay: installed - press JUMP next to a wall 80 to 180 units high (about 1.1 to 2.5 m) to climb it");
+	_MESSAGE("gameplay: installed - press JUMP near a wall to grab; use movement keys to climb and press JUMP at a ledge to mantle");
 }

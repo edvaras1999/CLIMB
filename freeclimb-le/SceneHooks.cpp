@@ -155,13 +155,14 @@ namespace
 	}
 
 	// ---- reproducao no tempo (passo 18) ----
-	volatile LONG		g_playing = 0, g_playFrames = 0, g_restReady = 0;
+	volatile LONG		g_playing = 0, g_playLooping = 0, g_playFrames = 0, g_restReady = 0;
 	int					g_playMotion = 0;
 	float				g_playSeconds = 1.0f;
 	volatile DWORD		g_playStart = 0;
 	float				g_rest[99 * 10];
 	float				g_scaleY = 1.0f, g_scaleZ = 1.0f;
 	SceneFinishCallback	g_finishCb = NULL;
+	SceneFrameCallback	g_frameCb = NULL;
 	unsigned			g_fkBadIdx[12], g_fkBadCount = 0;
 	float				g_fkRecT = 0, g_fkRecRot = 0;
 
@@ -231,18 +232,28 @@ namespace
 	// Depois da atualizacao do esqueleto do jogador.
 	void PostPass(unsigned flat)
 	{
-		const bool playing = g_playing && g_restReady;
-		if(!playing && !g_fkCheckRequested) return;
+		if(!g_frameCb && !g_playing && !g_fkCheckRequested) return;
 
 		unsigned entries, count;
 		if(!FlatArray(flat, &entries, &count)) return;
 		if(InterlockedCompareExchange(&g_inPose, 1, 0) != 0) return;
 
+		SceneFrameCallback frame = g_frameCb;
+		if(frame) frame();
+		const bool playing = g_playing && g_restReady;
+		if(!playing && !g_fkCheckRequested)
+		{
+			InterlockedExchange(&g_inPose, 0);
+			return;
+		}
+
 		bool finished = false;
 		if(playing)
 		{
 			float phase = (float)(GetTickCount() - g_playStart) / 1000.0f / g_playSeconds;
-			if(phase >= 1.0f) { phase = 1.0f; finished = true; }
+			if(g_playLooping)
+				phase -= floorf(phase);
+			else if(phase >= 1.0f) { phase = 1.0f; finished = true; }
 
 			if(FC_SampleMotion(g_playMotion, phase, g_pose) && ComputeWorlds(flat, true, entries, count))
 			{
@@ -297,6 +308,7 @@ namespace
 		if(finished)
 		{
 			InterlockedExchange(&g_playing, 0);
+			InterlockedExchange(&g_playLooping, 0);
 			SceneFinishCallback cb = g_finishCb;
 			g_finishCb = NULL;
 			if(cb) cb();
@@ -558,14 +570,42 @@ bool SceneHooksPlayMotion(int motion, float scaleY, float scaleZ, SceneFinishCal
 	if(secs <= 0.0f) return false;
 
 	g_playMotion = motion; g_playSeconds = secs; g_scaleY = scaleY; g_scaleZ = scaleZ; g_finishCb = onFinish;
+	InterlockedExchange(&g_playLooping, 0);
 	g_playFrames = 0; g_playStart = GetTickCount();
 	InterlockedExchange(&g_playing, 1);
 	return true;
 }
 
+bool SceneHooksPlayLoopingMotion(int motion)
+{
+	if(!g_restReady || !g_playerFlat || !g_frameCb) return false;
+	if(g_playing && g_playLooping && g_playMotion == motion) return true;
+	if(g_playing && !g_playLooping) return false;
+
+	const float secs = FC_MotionSeconds(motion);
+	if(secs <= 0.0f) return false;
+	g_playMotion = motion; g_playSeconds = secs; g_scaleY = 0.0f; g_scaleZ = 0.0f; g_finishCb = NULL;
+	g_playFrames = 0; g_playStart = GetTickCount();
+	InterlockedExchange(&g_playLooping, 1);
+	InterlockedExchange(&g_playing, 1);
+	return true;
+}
+
+void SceneHooksStopMotion()
+{
+	InterlockedExchange(&g_playing, 0);
+	InterlockedExchange(&g_playLooping, 0);
+	g_finishCb = NULL;
+}
+
 bool SceneHooksIsPlaying()
 {
 	return g_playing != 0;
+}
+
+void SceneHooksSetFrameCallback(SceneFrameCallback callback)
+{
+	g_frameCb = callback;
 }
 
 bool SceneHooksRootForward(float * x, float * y)
