@@ -2,6 +2,10 @@
 // o controlador do personagem e as unidades do Havok, e o motor de poses do FreeClimb (SceneHooks) para o desenho.
 
 #include <math.h>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 #include "Engine.h"
