@@ -5,6 +5,12 @@
 #include "Engine.h"
 #include "Havok.h"
 #include "skse/GameReferences.h"
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #include "src/Core.h"
 
 namespace fc {
