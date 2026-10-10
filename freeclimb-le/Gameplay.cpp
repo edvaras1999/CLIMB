@@ -9,6 +9,7 @@
 #include "Havok.h"
 #include "Log.h"
 #include "SceneHooks.h"
+#include "src/Core.h"
 
 #include "skse/GameInput.h"
 #include "skse/GameReferences.h"
@@ -57,6 +58,34 @@ namespace
 		float	forwardX, forwardY;	// direcao (plana, unitaria)
 	};
 
+	class TraversalWorld : public fc::World
+	{
+	public:
+		explicit TraversalWorld(Actor * actor) : m_actor(actor) {}
+
+		std::optional<fc::Hit> ray(fc::Vec from, fc::Vec to) override
+		{
+			const fc::Vec delta = to - from;
+			const float distance = delta.length();
+			if(!m_actor || !from.finite() || !to.finite() || distance <= 0.001f) return {};
+
+			const Havok::Result hit = Havok::RayCast(
+				NiPoint3(from.x, from.y, from.z),
+				NiPoint3(delta.x, delta.y, delta.z),
+				distance, Havok::kLayer_Transparent, m_actor);
+			if(!hit.didHit) return {};
+
+			return fc::Hit{
+				fc::Vec{hit.hitPosition.x, hit.hitPosition.y, hit.hitPosition.z},
+				fc::Vec{hit.normal.x, hit.normal.y, hit.normal.z},
+				true
+			};
+		}
+
+	private:
+		Actor * m_actor;
+	};
+
 	// Raios do Havok: parede a frente, superficie de cima, espaco livre por cima.
 	bool FindLedge(Actor * player, Ledge * out, const char ** reason)
 	{
@@ -103,6 +132,51 @@ namespace
 		return true;
 	}
 
+	// Usa a busca de bordas do FreeClimb quando a sonda LE simples nao encontra uma.
+	// A subida atual continua sendo reproduzida pelo motor de poses LE e permanece como fallback.
+	bool FindTraversalLedge(Actor * player, float fx, float fy, Ledge * out)
+	{
+		TraversalWorld world(player);
+		fc::Traversal traversal;
+		traversal.cfg.approachSeconds = 0.0f;
+		traversal.cfg.staminaEnabled = false;
+
+		const NiPoint3 feet = Engine::Position(player);
+		if(!traversal.attach(world, fc::Vec{feet.x, feet.y, feet.z},
+							 fc::Vec{fx, fy, 0.0f}, 1000.0f, 90.0f))
+			return false;
+
+		fc::Input input;
+		input.y = 1.0f;
+		input.mantle = true;
+		for(int i = 0; i < 3; ++i)
+		{
+			const fc::Result result = traversal.update(world, input, 0.05f, 1000.0f);
+			if(traversal.state == fc::State::mantle)
+			{
+				const fc::Vec target = traversal.topTarget();
+				const float dx = target.x - feet.x;
+				const float dy = target.y - feet.y;
+				const float forward = dx * fx + dy * fy;
+				const float side = -dx * fy + dy * fx;
+				const float height = target.z - feet.z;
+				if(!target.finite() || !isfinite(forward) || !isfinite(side) || !isfinite(height) ||
+					forward < 20.0f || forward > 180.0f || fabsf(side) > 1.5f ||
+					height < kMinHeight || height > kMaxHeight)
+					return false;
+
+				out->wallDistance = forward;
+				out->height = height;
+				out->topZ = target.z;
+				out->forwardX = fx;
+				out->forwardY = fy;
+				return true;
+			}
+			if(result.released || !traversal.active()) return false;
+		}
+		return false;
+	}
+
 	// Chamada no fim da animacao (na thread que atualiza o esqueleto): coloca o personagem em cima da borda.
 	void OnClimbFinished()
 	{
@@ -139,8 +213,18 @@ namespace
 		if(!FindLedge(player, &ledge, &reason))
 		{
 			if(strcmp(reason, "no wall ahead") != 0)
+			{
 				_MESSAGE("gameplay: jump pressed near a wall but no climb: %s", reason);
-			return false;
+				return false;
+			}
+
+			float fx, fy;
+			if(!SceneHooksRootForward(&fx, &fy) || !FindTraversalLedge(player, fx, fy, &ledge))
+			{
+				_MESSAGE("gameplay: jump pressed near a wall but no climb: %s", reason);
+				return false;
+			}
+			_MESSAGE("gameplay: FreeClimb traversal search found a ledge missed by the legacy probe");
 		}
 
 		// o clipe sobe 132.3 e avanca 62.9: ajusta a escala ao tamanho real da borda e a distancia a parede

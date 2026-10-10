@@ -130,7 +130,9 @@
     <ClCompile Include="..\..\skse\skse\GameRTTI.cpp" />
     <ClCompile Include="Engine.cpp" />
     <ClCompile Include="Havok.cpp" />
-    <ClCompile Include="Gameplay.cpp" />
+    <ClCompile Include="Gameplay.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
     <ClCompile Include="VtableScan.cpp" />
     <ClCompile Include="RttiReport.cpp" />
     <ClCompile Include="SceneHooks.cpp" />
