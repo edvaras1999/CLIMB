@@ -12,6 +12,7 @@
 #include "Havok.h"
 #include "Log.h"
 #include "SceneHooks.h"
+#include "TraversalWorld.h"
 #include "skse/GameInput.h"
 #include "skse/GameReferences.h"
 
