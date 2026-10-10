@@ -1,8 +1,6 @@
-// Gameplay.cpp - liga a state machine de traversal do FreeClimb aos controlos, Havok e poses do Skyrim LE.
+// Gameplay.cpp - liga a deteccao legacy de bordas aos controlos, Havok e poses do Skyrim LE.
 
-#include <algorithm>
-#include <math.h>
-#include <string.h>
+#include <cmath>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,54 +12,36 @@
 #include "Havok.h"
 #include "Log.h"
 #include "SceneHooks.h"
-#ifdef min
-#undef min
-#endif
-#ifdef max
-#undef max
-#endif
-#include "src/Core.h"
-
 #include "skse/GameInput.h"
 #include "skse/GameReferences.h"
 
 namespace
 {
 	UInt32 * const kJumpHandler		= (UInt32 *)0x010D460C;
-	UInt32 * const kMovementHandler	= (UInt32 *)0x010D4594;
 	enum { kSlot_CanProcess = 1, kSlot_ProcessButton = 4 };
 
 	typedef bool (__thiscall * CanProcess_t)(void *, InputEvent *);
 	typedef void (__thiscall * ProcessButton_t)(void *, ButtonEvent *, void *);
 
-	CanProcess_t		g_origJumpCan = NULL, g_origMoveCan = NULL;
+	CanProcess_t		g_origJumpCan = NULL;
 	ProcessButton_t		g_origJumpButton = NULL;
 
 	volatile LONG		g_climbing = 0;
 	volatile DWORD		g_climbStarted = 0;
 	float				g_destX = 0, g_destY = 0, g_destZ = 0;
-	CRITICAL_SECTION	g_traversalLock;
-	volatile LONG		g_traversalLockReady = 0;
 	volatile LONG		g_jumpConsumedUntilRelease = 0;
-	volatile LONG		g_traversalCooldownUntil = 0;
-	fc::Traversal		g_traversal;
-	bool				g_traversalActive = false, g_traversalMantling = false, g_mantleRequested = false;
-	DWORD				g_traversalLastTick = 0;
-	int					g_traversalLoopMotion = 0;
-	fc::Vec				g_traversalDestination;
-	fc::Vec				g_traversalMantleStart;
+	volatile LONG		g_climbCooldownUntil = 0;
 
 	// motion 42 = contextMantle (subir por cima de uma borda). Deslocamento do centro do corpo no fim do clipe,
 	// em relacao ao repouso: ~62.9 para a frente (y) e ~132.3 para cima (z).
 	const int			kMantle = 42;
 	const float			kMantleForward = 62.9f, kMantleUp = 132.3f;
 	const float			kMinHeight = 80.0f, kMaxHeight = 180.0f;		// bordas alcancaveis (unidades do Skyrim)
-	const DWORD			kTraversalCooldownMs = 750;
+	const DWORD			kClimbCooldownMs = 750;
 	const float			kWorldHorizontalLimit = 100000.0f, kWorldVerticalMin = -10000.0f, kWorldVerticalMax = 30000.0f;
-	const float			kMantleHorizontalLimit = 180.0f, kMantleVerticalLimit = 220.0f;
+	const float			kMantleHorizontalLimit = 180.0f, kMantleVerticalMin = 40.0f, kMantleVerticalMax = 220.0f;
 
 	NiPoint3 Add(const NiPoint3 & a, const NiPoint3 & b)	{ return NiPoint3(a.x + b.x, a.y + b.y, a.z + b.z); }
-	NiPoint3 Scale(const NiPoint3 & a, float s)				{ return NiPoint3(a.x * s, a.y * s, a.z * s); }
 
 	template<class Fn> void PatchSlot(UInt32 * vtable, int slot, void * hook, Fn * original)
 	{
@@ -82,268 +62,31 @@ namespace
 		float	forwardX, forwardY;	// direcao (plana, unitaria)
 	};
 
-	class TraversalWorld : public fc::World
+	void StartClimbCooldown()
 	{
-	public:
-		explicit TraversalWorld(Actor * actor) : m_actor(actor) {}
-
-		std::optional<fc::Hit> ray(fc::Vec from, fc::Vec to) override
-		{
-			const fc::Vec delta = to - from;
-			const float distance = delta.length();
-			if(!m_actor || !from.finite() || !to.finite() || distance <= 0.001f) return {};
-
-			const Havok::Result hit = Havok::RayCast(
-				NiPoint3(from.x, from.y, from.z),
-				NiPoint3(delta.x, delta.y, delta.z),
-				distance, Havok::kLayer_Transparent, m_actor);
-			if(!hit.didHit) return {};
-
-			return fc::Hit{
-				fc::Vec{hit.hitPosition.x, hit.hitPosition.y, hit.hitPosition.z},
-				fc::Vec{hit.normal.x, hit.normal.y, hit.normal.z},
-				true
-			};
-		}
-
-	private:
-		Actor * m_actor;
-	};
-
-	struct TraversalGuard
-	{
-		TraversalGuard() { EnterCriticalSection(&g_traversalLock); }
-		~TraversalGuard() { LeaveCriticalSection(&g_traversalLock); }
-	};
-
-	void StartTraversalCooldown()
-	{
-		InterlockedExchange(&g_traversalCooldownUntil, (LONG)(GetTickCount() + kTraversalCooldownMs));
+		InterlockedExchange(&g_climbCooldownUntil, (LONG)(GetTickCount() + kClimbCooldownMs));
 	}
 
-	bool SafeWorldPosition(fc::Vec position)
+	bool SafeWorldPosition(const NiPoint3 & position)
 	{
-		return position.finite() &&
+		return std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z) &&
 			std::abs(position.x) <= kWorldHorizontalLimit &&
 			std::abs(position.y) <= kWorldHorizontalLimit &&
 			position.z >= kWorldVerticalMin && position.z <= kWorldVerticalMax;
 	}
 
-	bool SafeMantleTarget(fc::Vec target, fc::Vec current, fc::Vec mantleStart, fc::Vec wallNormal,
-						  float * forwardOut = NULL, float * sideOut = NULL, float * heightOut = NULL)
+	bool ClimbCooldownActive()
 	{
-		if(!SafeWorldPosition(target) || !SafeWorldPosition(current) || !SafeWorldPosition(mantleStart))
-			return false;
-		wallNormal.z = 0.0f;
-		wallNormal = wallNormal.unit();
-		if(wallNormal.length() < 0.9f) return false;
-
-		const fc::Vec fromCurrent = target - current;
-		const fc::Vec fromStart = target - mantleStart;
-		const float horizontalCurrent = std::hypot(fromCurrent.x, fromCurrent.y);
-		const float horizontalStart = std::hypot(fromStart.x, fromStart.y);
-		const float heightCurrent = fromCurrent.z;
-		const float forward = -(fromStart.x * wallNormal.x + fromStart.y * wallNormal.y);
-		const float side = fromStart.x * -wallNormal.y + fromStart.y * wallNormal.x;
-		if(!fromCurrent.finite() || !fromStart.finite() ||
-			horizontalCurrent > kMantleHorizontalLimit || horizontalStart > kMantleHorizontalLimit ||
-			heightCurrent < 20.0f || heightCurrent > kMantleVerticalLimit ||
-			fromStart.z < 20.0f || fromStart.z > kMantleVerticalLimit ||
-			forward < 16.0f || forward > kMantleHorizontalLimit || std::abs(side) > 8.0f)
-			return false;
-
-		if(forwardOut) *forwardOut = forward;
-		if(sideOut) *sideOut = side;
-		if(heightOut) *heightOut = fromStart.z;
-		return true;
-	}
-
-	bool TraversalCooldownActive()
-	{
-		const DWORD until = (DWORD)InterlockedCompareExchange(&g_traversalCooldownUntil, 0, 0);
+		const DWORD until = (DWORD)InterlockedCompareExchange(&g_climbCooldownUntil, 0, 0);
 		return (LONG)(until - GetTickCount()) > 0;
 	}
 
-	bool TraversalMantling()
-	{
-		if(!g_traversalLockReady) return false;
-		TraversalGuard guard;
-		return g_traversalActive && g_traversalMantling;
-	}
-
-	bool TraversalActive()
-	{
-		if(!g_traversalLockReady) return false;
-		TraversalGuard guard;
-		return g_traversalActive;
-	}
-
-	void StopTraversalVelocity(Actor * player)
+	void StopPlayerVelocity(Actor * player)
 	{
 		void * ctrl = player ? Engine::CharController(player) : NULL;
 		if(!ctrl) return;
 		__declspec(align(16)) float stop[4] = { 0, 0, 0, 0 };
 		Engine::ControllerSetLinearVelocity(ctrl, stop);
-	}
-
-	void SetTraversalPosition(Actor * player, fc::Vec position, bool stopVelocity)
-	{
-		void * ctrl = player ? Engine::CharController(player) : NULL;
-		if(!ctrl || !position.finite()) return;
-		const float scale = Engine::HavokScale();
-		__declspec(align(16)) float target[4] = {
-			position.x * scale, position.y * scale, position.z * scale, 0.0f
-		};
-		Engine::ControllerSetPosition(ctrl, target, true, true);
-		if(stopVelocity)
-		{
-			__declspec(align(16)) float stop[4] = { 0, 0, 0, 0 };
-			Engine::ControllerSetLinearVelocity(ctrl, stop);
-		}
-	}
-
-	void AbortTraversal(Actor * player, const char * reason)
-	{
-		SceneHooksStopMotion();
-		SceneHooksSetFrameCallback(NULL);
-		StopTraversalVelocity(player);
-		g_traversal.stop();
-		g_traversalActive = false;
-		g_traversalMantling = false;
-		g_mantleRequested = false;
-		g_traversalLoopMotion = 0;
-		g_traversalLastTick = 0;
-		StartTraversalCooldown();
-		_MESSAGE("gameplay: traversal aborted without repositioning: %s", reason);
-	}
-
-	void FinishTraversalMantle()
-	{
-		TraversalGuard guard;
-		if(!g_traversalActive || !g_traversalMantling) return;
-		Actor * player = (Actor *)Engine::Player();
-		if(!player || !SafeMantleTarget(g_traversalDestination,
-				fc::Vec{Engine::Position(player).x, Engine::Position(player).y, Engine::Position(player).z},
-				g_traversalMantleStart, g_traversal.normal))
-		{
-			AbortTraversal(player, "mantle completion target failed the final world/relative-position check");
-			return;
-		}
-		SetTraversalPosition(player, g_traversalDestination, true);
-		g_traversal.stop();
-		g_traversalActive = false;
-		g_traversalMantling = false;
-		g_traversalLoopMotion = 0;
-		g_traversalLastTick = 0;
-		SceneHooksSetFrameCallback(NULL);
-		StartTraversalCooldown();
-		_MESSAGE("gameplay: traversal mantle finished at (%.0f %.0f %.0f)",
-				 (double)g_traversalDestination.x, (double)g_traversalDestination.y, (double)g_traversalDestination.z);
-	}
-
-	void UpdateTraversalFrame()
-	{
-		TraversalGuard guard;
-		if(!g_traversalActive || g_traversalMantling) return;
-
-		Actor * player = (Actor *)Engine::Player();
-		void * ctrl = player ? Engine::CharController(player) : NULL;
-		if(!player || !ctrl)
-		{
-			AbortTraversal(player, "the player controller disappeared");
-			return;
-		}
-
-		const DWORD now = GetTickCount();
-		float dt = g_traversalLastTick ? (float)(now - g_traversalLastTick) / 1000.0f : 0.016f;
-		g_traversalLastTick = now;
-		if(dt > 0.05f) dt = 0.05f;
-
-		const UInt32 flags = Engine::ActorFlags1(player);
-		fc::Input input;
-		input.x = ((flags & Engine::kFlag1_MovingRight) ? 1.0f : 0.0f) -
-				  ((flags & Engine::kFlag1_MovingLeft) ? 1.0f : 0.0f);
-		input.y = ((flags & Engine::kFlag1_MovingForward) ? 1.0f : 0.0f) -
-				  ((flags & Engine::kFlag1_MovingBack) ? 1.0f : 0.0f);
-		input.mantle = g_mantleRequested;
-		g_mantleRequested = false;
-
-		TraversalWorld world(player);
-		const fc::Result result = g_traversal.update(world, input, dt, 1000.0f);
-		if(input.mantle && g_traversal.state != fc::State::mantle)
-		{
-			AbortTraversal(player, "jump requested an exit but no validated mantle path was available");
-			return;
-		}
-		if(g_traversal.state == fc::State::mantle && result.motion == fc::Motion::contextMantle)
-		{
-			g_traversalDestination = g_traversal.topTarget();
-			const NiPoint3 actorPosition = Engine::Position(player);
-			const fc::Vec current{actorPosition.x, actorPosition.y, actorPosition.z};
-			g_traversalMantleStart = g_traversal.position;
-			float forward = 0.0f, side = 0.0f, height = 0.0f;
-			if(!SafeMantleTarget(g_traversalDestination, current, g_traversalMantleStart,
-								 g_traversal.normal, &forward, &side, &height))
-			{
-				AbortTraversal(player, "mantle destination is outside the safe world-coordinate envelope");
-				return;
-			}
-			const float scaleY = forward / kMantleForward;
-			const float scaleZ = height / kMantleUp;
-
-			if(!std::isfinite(scaleY) || !std::isfinite(scaleZ) ||
-				scaleY < 0.25f || scaleY > 2.0f || scaleZ < 0.25f || scaleZ > 2.0f)
-			{
-				AbortTraversal(player, "mantle target cannot be represented by the available animation scale");
-				return;
-			}
-
-			SceneHooksStopMotion();
-			if(SceneHooksPlayMotion(kMantle, scaleY, scaleZ, &FinishTraversalMantle))
-			{
-				g_traversalMantling = true;
-				g_traversalLoopMotion = 0;
-				_MESSAGE("gameplay: traversal reached a ledge; starting mantle (forward %.1f, height %.1f)",
-						 (double)forward, (double)(g_traversalDestination.z - current.z));
-			}
-			else
-			{
-				AbortTraversal(player, "validated ledge found but mantle pose could not start");
-			}
-			return;
-		}
-
-		if(result.released || !g_traversal.active())
-		{
-			AbortTraversal(player, result.reason);
-			return;
-		}
-
-		if(g_traversal.state != fc::State::mantle)
-		{
-			const NiPoint3 actual = Engine::Position(player);
-			const fc::Vec delta = g_traversal.position - fc::Vec{actual.x, actual.y, actual.z};
-			const float allowedStep = g_traversal.state == fc::State::approach ? 32.0f : 18.0f;
-			if(!SafeWorldPosition(g_traversal.position) || !delta.finite() || delta.length() > allowedStep)
-			{
-				AbortTraversal(player, "controller position diverged from the collision-checked traversal path");
-				return;
-			}
-			SetTraversalPosition(player, g_traversal.position, true);
-		}
-
-		const int motion = (int)result.motion;
-		if((motion >= (int)fc::Motion::hang && motion <= (int)fc::Motion::right) ||
-			motion == (int)fc::Motion::reach)
-		{
-			if(motion != g_traversalLoopMotion)
-			{
-				if(SceneHooksPlayLoopingMotion(motion))
-					g_traversalLoopMotion = motion;
-				else
-					_MESSAGE("gameplay: could not start traversal pose %d", motion);
-			}
-		}
 	}
 
 	// Raios do Havok: parede a frente, superficie de cima, espaco livre por cima.
@@ -392,66 +135,6 @@ namespace
 		return true;
 	}
 
-	// Usa a busca de bordas do FreeClimb quando a sonda LE simples nao encontra uma.
-	// A subida atual continua sendo reproduzida pelo motor de poses LE e permanece como fallback.
-	bool FindTraversalLedge(Actor * player, float fx, float fy, Ledge * out)
-	{
-		TraversalWorld world(player);
-		fc::Traversal traversal;
-		traversal.cfg.approachSeconds = 0.0f;
-		traversal.cfg.staminaEnabled = false;
-
-		const NiPoint3 feet = Engine::Position(player);
-		if(!traversal.attach(world, fc::Vec{feet.x, feet.y, feet.z},
-							 fc::Vec{fx, fy, 0.0f}, 1000.0f, 90.0f))
-		{
-			_MESSAGE("gameplay: traversal attach rejected: %s (distance %.1f)",
-					 fc::name(traversal.lastFailure), (double)traversal.lastAttachDistance);
-			return false;
-		}
-
-		fc::Input input;
-		input.y = 1.0f;
-		input.mantle = true;
-		for(int i = 0; i < 3; ++i)
-		{
-			const fc::Result result = traversal.update(world, input, 0.05f, 1000.0f);
-			if(traversal.state == fc::State::mantle)
-			{
-				const fc::Vec target = traversal.topTarget();
-				const float dx = target.x - feet.x;
-				const float dy = target.y - feet.y;
-				const float forward = dx * fx + dy * fy;
-				const float side = -dx * fy + dy * fx;
-				const float height = target.z - feet.z;
-				if(!target.finite() || !isfinite(forward) || !isfinite(side) || !isfinite(height) ||
-					forward < 20.0f || forward > 180.0f || fabsf(side) > 1.5f ||
-					height < kMinHeight || height > kMaxHeight)
-				{
-					_MESSAGE("gameplay: traversal mantle target rejected: forward %.1f side %.1f height %.1f",
-							 (double)forward, (double)side, (double)height);
-					return false;
-				}
-
-				out->wallDistance = forward;
-				out->height = height;
-				out->topZ = target.z;
-				out->forwardX = fx;
-				out->forwardY = fy;
-				return true;
-			}
-			if(result.released || !traversal.active())
-			{
-				_MESSAGE("gameplay: traversal search ended before mantle: %s; ledge=%s",
-						 result.reason, traversal.ledgeReason);
-				return false;
-			}
-		}
-		_MESSAGE("gameplay: traversal search did not settle on a mantle: state=%u; ledge=%s",
-				 (unsigned)traversal.state, traversal.ledgeReason);
-		return false;
-	}
-
 	// Chamada no fim da animacao (na thread que atualiza o esqueleto): coloca o personagem em cima da borda.
 	void OnClimbFinished()
 	{
@@ -467,17 +150,18 @@ namespace
 		if(ctrl)
 		{
 			const NiPoint3 current = Engine::Position(player);
-			const fc::Vec mantleTarget{g_destX, g_destY, g_destZ + 1.0f};
+			const NiPoint3 mantleTarget(g_destX, g_destY, g_destZ + 1.0f);
 			const float horizontal = std::hypot(mantleTarget.x - current.x, mantleTarget.y - current.y);
 			const float vertical = mantleTarget.z - current.z;
 			if(!SafeWorldPosition(mantleTarget) || !std::isfinite(horizontal) || !std::isfinite(vertical) ||
-				horizontal > kMantleHorizontalLimit || vertical < 40.0f || vertical > kMantleVerticalLimit)
+				horizontal > kMantleHorizontalLimit ||
+				vertical < kMantleVerticalMin || vertical > kMantleVerticalMax)
 			{
 				_MESSAGE("gameplay: legacy mantle completion rejected unsafe target delta (xy %.1f z %.1f)",
 						 (double)horizontal, (double)vertical);
-				StopTraversalVelocity(player);
+				StopPlayerVelocity(player);
 				InterlockedExchange(&g_climbing, 0);
-				StartTraversalCooldown();
+				StartClimbCooldown();
 				return;
 			}
 
@@ -494,7 +178,7 @@ namespace
 			placed = true;
 		}
 		_MESSAGE("gameplay: climb finished - player %s at (%.0f %.0f %.0f)", placed ? "placed on top" : "not repositioned (controller unavailable)", (double)g_destX, (double)g_destY, (double)g_destZ);
-		StartTraversalCooldown();
+		StartClimbCooldown();
 		InterlockedExchange(&g_climbing, 0);
 	}
 
@@ -511,22 +195,8 @@ namespace
 		const char * reason = "";
 		if(!FindLedge(player, &ledge, &reason))
 		{
-			const bool legacyWallSearchFailed = strcmp(reason, "no wall ahead") == 0;
-			const bool legacyTopSearchFailed = strcmp(reason, "no flat top behind the wall") == 0;
-			if(!legacyWallSearchFailed && !legacyTopSearchFailed)
-			{
-				_MESSAGE("gameplay: jump pressed near a wall but no climb: %s", reason);
-				return false;
-			}
-
-			float fx, fy;
-			if(!SceneHooksRootForward(&fx, &fy) || !FindTraversalLedge(player, fx, fy, &ledge))
-			{
-				_MESSAGE("gameplay: jump pressed near a wall but no climb: %s", reason);
-				return false;
-			}
-			_MESSAGE("gameplay: FreeClimb traversal search found a ledge missed by the legacy %s",
-					 legacyWallSearchFailed ? "wall probe" : "top probe");
+			_MESSAGE("gameplay: legacy ledge probe found no mantle target: %s", reason);
+			return false;
 		}
 
 		// o clipe sobe 132.3 e avanca 62.9: ajusta a escala ao tamanho real da borda e a distancia a parede
@@ -539,7 +209,7 @@ namespace
 		g_destZ = ledge.topZ;
 		const float horizontal = std::hypot(g_destX - feet.x, g_destY - feet.y);
 		const float vertical = g_destZ - feet.z;
-		if(!SafeWorldPosition(fc::Vec{g_destX, g_destY, g_destZ}) ||
+		if(!SafeWorldPosition(NiPoint3(g_destX, g_destY, g_destZ)) ||
 			!std::isfinite(horizontal) || !std::isfinite(vertical) ||
 			horizontal > kMantleHorizontalLimit || vertical < kMinHeight || vertical > kMaxHeight)
 		{
@@ -569,7 +239,7 @@ namespace
 			_MESSAGE("gameplay: climb timed out - releasing the controls");
 			InterlockedExchange(&g_climbing, 0);
 			SceneHooksStopMotion();
-			StartTraversalCooldown();
+			StartClimbCooldown();
 		}
 		return g_climbing != 0;
 	}
@@ -577,12 +247,6 @@ namespace
 	bool __fastcall Hook_JumpCanProcess(void * handler, void *, InputEvent * event)
 	{
 		return g_origJumpCan(handler, event);
-	}
-
-	bool __fastcall Hook_MoveCanProcess(void * handler, void *, InputEvent * event)
-	{
-		if(Climbing() || TraversalActive()) return false;
-		return g_origMoveCan(handler, event);
 	}
 
 	void __fastcall Hook_JumpButton(void * handler, void *, ButtonEvent * event, void * data)
@@ -608,23 +272,7 @@ namespace
 
 			if(event->timer == 0.0f)
 			{
-				bool handled = false;
-				if(g_traversalLockReady)
-				{
-					TraversalGuard guard;
-					if(g_traversalActive)
-					{
-						if(!g_traversalMantling) g_mantleRequested = true;
-						handled = true;
-					}
-				}
-
-				if(handled)
-				{
-					InterlockedExchange(&g_jumpConsumedUntilRelease, 1);
-					return;
-				}
-				if(!TraversalCooldownActive() && TryStartClimb())
+				if(!ClimbCooldownActive() && TryStartClimb())
 				{
 					InterlockedExchange(&g_jumpConsumedUntilRelease, 1);
 					return;
@@ -637,10 +285,7 @@ namespace
 
 void InstallGameplay()
 {
-	if(InterlockedCompareExchange(&g_traversalLockReady, 1, 0) == 0)
-		InitializeCriticalSectionAndSpinCount(&g_traversalLock, 4000);
 	PatchSlot(kJumpHandler,		kSlot_CanProcess,	(void *)&Hook_JumpCanProcess,	&g_origJumpCan);
-	PatchSlot(kMovementHandler,	kSlot_CanProcess,	(void *)&Hook_MoveCanProcess,	&g_origMoveCan);
 	PatchSlot(kJumpHandler,		kSlot_ProcessButton,(void *)&Hook_JumpButton,		&g_origJumpButton);
-	_MESSAGE("gameplay: installed - press JUMP near a valid ledge for the safe legacy mantle; continuous wall traversal is disabled");
+	_MESSAGE("gameplay: installed - legacy wall/top probes only; press JUMP near a valid ledge for the safe mantle");
 }
