@@ -67,34 +67,21 @@ jobs:
 
           '=== inicio ===' | Out-File $log
 
-          # Lista de tentativas (cada uma e uma lista de argumentos). As opcoes sao as da ajuda do Caprica v0.3.0.
-          $tries = New-Object System.Collections.ArrayList
-          [void]$tries.Add(@('--game', 'skyrim', '--flags', $flags, '--ignorecwd', '--import', $stubs, '--import', $src, '--output', $out) + $files)
-          [void]$tries.Add(@('--game', 'skyrim', '--flags', $flags, '--import', $stubs, '--import', $src, '--output', $out) + $files)
-          [void]$tries.Add(@('--game', 'skyrim', '--flags', $flags, '--ignorecwd', '--import', "$stubs;$src", '--output', $out) + $files)
-
-          $ok = $false
-          $n = 0
-          foreach ($t in $tries) {
-            $n++
-            "=== tentativa $n : $($t -join ' ') ===" | Out-File $log -Append
-            Get-ChildItem $out -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            & $env:CAPRICA @t 2>&1 | Tee-Object -FilePath $log -Append
-            $code = $LASTEXITCODE
-            $mcm = Get-ChildItem $out -Recurse -Filter 'FreeClimbMCM.pex' -ErrorAction SilentlyContinue | Select-Object -First 1
-            $nat = Get-ChildItem $out -Recurse -Filter 'FreeClimbNative.pex' -ErrorAction SilentlyContinue | Select-Object -First 1
-            "codigo de saida: $code ; MCM.pex: $([bool]$mcm) ; Native.pex: $([bool]$nat)" | Tee-Object -FilePath $log -Append
-            if ($code -eq 0 -and $mcm -and $nat) {
-              # Poe os dois .pex na raiz da pasta out (o Caprica pode cria-los em subpastas).
-              foreach ($f in @($mcm, $nat)) {
-                $dst = Join-Path $out $f.Name
-                if ($f.FullName -ne $dst) { Copy-Item $f.FullName $dst -Force }
-              }
-              $ok = $true
-              break
-            }
+          # Eventos enviados por RegisterForModEvent (como FreeClimb_Sound) nao
+          # estao declarados nos scripts-base; permita esses callbacks no Caprica.
+          $capricaArgs = @('--game', 'skyrim', '--flags', $flags, '--ignorecwd', '--allow-unknown-events', 'true', '--import', $stubs, '--import', $src, '--output', $out) + $files
+          "=== Caprica: $($capricaArgs -join ' ') ===" | Out-File $log -Append
+          & $env:CAPRICA @capricaArgs 2>&1 | Tee-Object -FilePath $log -Append
+          $code = $LASTEXITCODE
+          $mcm = Get-ChildItem $out -Recurse -Filter 'FreeClimbMCM.pex' -ErrorAction SilentlyContinue | Select-Object -First 1
+          $nat = Get-ChildItem $out -Recurse -Filter 'FreeClimbNative.pex' -ErrorAction SilentlyContinue | Select-Object -First 1
+          "codigo de saida: $code ; MCM.pex: $([bool]$mcm) ; Native.pex: $([bool]$nat)" | Tee-Object -FilePath $log -Append
+          if ($code -ne 0 -or -not $mcm -or -not $nat) { Write-Host '=== COMPILACAO FALHOU (veja o artefato papyrus) ==='; exit 1 }
+          # Poe os dois .pex na raiz da pasta out (o Caprica pode cria-los em subpastas).
+          foreach ($f in @($mcm, $nat)) {
+            $dst = Join-Path $out $f.Name
+            if ($f.FullName -ne $dst) { Copy-Item $f.FullName $dst -Force }
           }
-          if (-not $ok) { Write-Host '=== TODAS AS TENTATIVAS FALHARAM (veja o artefato papyrus) ==='; exit 1 }
           Write-Host 'Compilou.'
           Get-ChildItem $out -Recurse | Format-Table FullName, Length
 
