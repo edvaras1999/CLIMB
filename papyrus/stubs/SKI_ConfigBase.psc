@@ -32,6 +32,10 @@ Event OnOptionMenuAccept(int a_option, int a_index)
 EndEvent
 Event OnOptionKeyMapChange(int a_option, int a_keyCode, string a_conflictControl, string a_conflictName)
 EndEvent
+; Evento ModEvent emitido pelo FreeClimbLE. Esta declaracao e so para o Caprica
+; reconhecer o callback herdado ao compilar FreeClimbMCM; nao substitui o SKI_ConfigBase do SkyUI.
+Event OnFreeClimbSound(string a_eventName, string a_name, float a_volume, Form a_sender)
+EndEvent
 
 Function ForcePageReset()
 EndFunction
