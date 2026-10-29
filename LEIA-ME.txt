@@ -1,59 +1,33 @@
-FREECLIMB LE - VERSAO COMPLETA (passos B a F, sobre o passo A)
+FREECLIMB LE - VERSAO FINAL (0.29.0)
 
-O QUE HA DE NOVO
- 1. MENU (MCM) proprio, em ingles e portugues, com 8 paginas e "Guardar o meu perfil". Todas as 57 opcoes. O .ini e gravado a
-    cada mudanca (o menu e o .ini nunca divergem). Mesmo padrao do SoftTarget (FreeClimbNative + FreeClimbMCM + um ESP minusculo).
- 2. INI: FreeClimbLE.ini ao lado da DLL (ou Data\SKSE\Plugins\FreeClimbLE.ini). Se nao existir, a DLL cria um com os
-    valores de fabrica. Aceita tambem FreeClimb.ini (nome do mod original) se tiver as nossas chaves. O log diz o caminho usado.
- 3. ESTAMINA propria: custo por segundo (parado, subir, descer, de lado, correr) e por acao (salto, passar a borda),
-    multiplicador de dificuldade, regeneracao suspensa na parede. Sem estamina: escorrega devagar e so volta a subir
-    quando passar de 15% (durante o escorregar a estamina regenera). Passar a borda nunca e recusado.
- 4. SALTOS: antes de saltar para o lado, a DLL anda pela parede em passos de 20 unidades e mede-a (segue pilares e arvores,
-    e encurta onde a parede acaba). Sem parede a frente: salto normal na direcao pedida e depois cai (nao tenta agarrar no ar).
- 5. MAOS E PES NA SUPERFICIE: raios por membro em contacto, corrigidos com IK. Orcamento de raios por atualizacao
-    (FitRays, no maximo 4); abaixo de FitMinFps (35) usa so 1 raio por atualizacao, para o seu PC nao sofrer.
- 6. COMANDO ANALOGICO: direcao e velocidade continuas, zona morta configuravel.
- 7. SONS: agarrar, passos (nos contactos de maos e pes), impulso e topo. A DLL envia o evento "FreeClimb_Sound" e o script
-    do menu toca o som. Por evento: sem custo continuo.
- 8. SEGUIDOR (experimental, desligado): o NPC escolhido com F11 no FreeRun escala ao seu lado com a mesma pose.
+O QUE TEM
+ - Escalada com a pose do mod original: corpo na parede, corrida orientada, diagonais, maos e pes na superficie (raios),
+   saltos que seguem a parede (pilares, arvores) e salto normal quando nao ha parede.
+ - ESCORREGAR (novo): Shift + S na parede. Acelera de 60 ate 280 unidades/s em ~1 s; ao largar trava em ~0,25 s e fica agarrado.
+   Pose de agarrado, A/D corrige a trajetoria a 40%. No chao larga e fica de pe. Custo de estamina 1 %/s. Sons: agarrar + raspagem.
+ - Estamina propria, comando analogico, sons, camara/rotacao suaves, velocidades pelo clip com arranque lento.
+ - Menu (MCM) em ingles e portugues, 7 paginas, 59 opcoes, "Guardar o meu perfil". O .ini e gravado a cada mudanca.
+ - Seguidor NPC: DESATIVADO (sem opcao no menu nem no .ini). Nao precisa de alterar o FreeRun.
 
-FICHEIROS (cada um vai para a mesma pasta no repositorio)
- FreeClimbe-Beta-main\
-   LEIA-ME.txt, FreeClimbLE.ini
-   freeclimb-le\  Options.cpp, Options.h (NOVOS), Gameplay.cpp, SceneHooks.cpp/.h, PackLoader.cpp/.h, Engine.h,
-                   FreeClimbLE.cpp, FreeClimbLE.vcxproj (acrescenta o Options.cpp)
-   papyrus\       src\FreeClimbNative.psc, src\FreeClimbMCM.psc, stubs\*.psc, TESV_Papyrus_Flags.flg, FreeClimbMenu.esp
-   .github\workflows\compile-papyrus.yml (NOVO)   tools\make_menu_esp.py (NOVO, so documenta como o ESP foi feito)
- FreeRunn-NPC-Patch-main\freerun-npc\NpcParkour.cpp   (so para o seguidor)
+OPCOES NOVAS (menu: pagina Movimento > "Escorregar"; .ini: grupo ESCORREGAR)
+ SlideEnabled=1   SlideMaxSpeed=280   SlideAccel=220   SlideStamina=1
 
-COMO INSTALAR
- 1. Repositorio: copie os ficheiros acima. "Actions > Run workflow" para a DLL (como sempre) E para o Papyrus
-    (compile-papyrus: gera FreeClimbNative.pex e FreeClimbMCM.pex).
- 2. No jogo (Data\):
-      SKSE\Plugins\FreeClimbLE.dll          (a nova)
-      SKSE\Plugins\FreeClimbLE.ini          (o novo; apague o antigo)
-      Scripts\FreeClimbNative.pex e Scripts\FreeClimbMCM.pex   (do artefato "papyrus")
-      FreeClimbMenu.esp                      (ative-o; precisa de FreeClimb.esp e do SkyUI)
-    O pack de animacoes continua a ser o 0.5.0 do mod original.
- 3. Seguidor: substitua o NpcParkour.cpp no FreeRun e recompile a FreerunLE.dll. No menu, pagina Seguidor, ligue-o.
- 4. Um jogo NOVO ou o primeiro carregamento com o ESP: espere ~1 minuto; depois abra o MCM (Pagina "Geral" mostra o estado).
+FICHEIROS DESTA ENTREGA (so os alterados)
+ LEIA-ME.txt, FreeClimbLE.ini
+ freeclimb-le\  Gameplay.cpp, Options.cpp, Options.h, FreeClimbLE.cpp
+ papyrus\       src\FreeClimbMCM.psc, stubs\Debug.psc
+ Atualize o FreeClimbLE.ini no jogo (ou apague-o: a DLL cria um novo com os valores de fabrica).
+ Recompile a DLL e o Papyrus (workflows), como antes. O FreeClimbMenu.esp que juntou continua igual: nao mexa.
 
-O QUE FOI VERIFICADO AQUI (sem o jogo)
- - A DLL inteira compila com os headers REAIS do SKSE 1.7.3 (clang em modo MSVC; o MSVC do Actions e o que decide).
- - Motor de pose: reproduz a pose autoral com erro 0,0000 (jogador e seguidor, esqueletos com mistura de nos/entradas).
- - O gerador do ESP reproduz o seu SoftTarget.esp BYTE A BYTE; os 57 itens do menu coincidem com a tabela da DLL.
- - Suavidade, IK dos membros e continuidade: medidos numericamente.
- NAO verificado (so o jogo diz): a compilacao do Papyrus (o Caprica so corre em Windows: veja o log do workflow),
- os registos de som (SOUN) do ESP, o comportamento do NPC seguidor, e o aspeto real do ajuste a superficie.
+LOG (FreeClimbLE.log)
+ "environment: ... LOADED / found"      -> a DLL ve o SkyUI e o seu FreeClimbMenu.esp (quest 0x809, sons 0x801-0x808)
+ "menu: the menu script called the DLL" -> o script do menu esta a correr
+ "sound: first event sent"              -> o primeiro som foi pedido ao menu
+ No Papyrus.0.log (se ativar o log do Papyrus): linhas "FreeClimbMCM: ..." com o mesmo diagnostico.
 
-SE ALGO FALHAR, ENVIE O FreeClimbLE.log. Linhas uteis:
- "options: read N options from <caminho>"   -> qual INI esta a ser usado
- "papyrus interface: registered"            -> o menu consegue falar com a DLL
- "menu: <chave> = <valor>"                  -> o que mudou no menu
- "gameplay: HOP ... along the wall"         -> salto que seguiu a parede; "HOP with no wall ahead" -> salto normal
- "gameplay: out of stamina" / "recovered"   -> estamina
- "follower N: ..."                          -> seguidor ligado/solto
- Ponha Verbose=1 so se lhe pedir (mostra os sons).
+VERIFICADO AQUI (sem o jogo): a DLL compila com os headers reais do SKSE 1.7.3; o menu e a tabela da DLL coincidem
+ (59 opcoes); o motor de pose reproduz a pose com erro 0,0000; a logica do escorregar foi simulada a 60, 30 e 20 fps.
+ So o jogo confirma: a sensacao do escorregar e a compilacao do Papyrus no workflow.
 
-AINDA POR FAZER: primeira pessoa com o Enhanced Camera (precisa de diagnostico: diga-me se acontece so na parede, e a versao
-do Enhanced Camera); o "degrau invisivel" das bordas (o log ja regista cada borda aceite: mande a linha quando acontecer).
+POR RESOLVER (fora desta versao): primeira pessoa com o Enhanced Camera; "degrau invisivel" em algumas bordas
+ (o log regista cada borda aceite: "ledge accepted").
